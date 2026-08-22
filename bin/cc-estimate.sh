@@ -19,6 +19,7 @@
 set -u
 
 MODEL=""; TASK=""; LANES=1; MAXPAR=4; RUN_ID=""
+COMPARE=0; CHAIN_TASK=""; CHAIN_MODEL="sonnet"
 while [ $# -gt 0 ]; do
   case "$1" in
     --task) TASK=$2; shift 2 ;;
@@ -26,12 +27,19 @@ while [ $# -gt 0 ]; do
     --lanes) LANES=$2; shift 2 ;;
     --maxpar) MAXPAR=$2; shift 2 ;;
     --run-id) RUN_ID=$2; shift 2 ;;
+    --compare) COMPARE=1; shift ;;
+    --chain-task) CHAIN_TASK=$2; shift 2 ;;
+    --chain-model) CHAIN_MODEL=$2; shift 2 ;;
     *) echo "cc-estimate: невідомий аргумент $1" >&2; exit 1 ;;
   esac
 done
 [ -n "$TASK" ] || { echo "cc-estimate: --task обов'язковий" >&2; exit 1; }
 [ -n "$MODEL" ] || { echo "cc-estimate: --model обов'язковий" >&2; exit 1; }
 [ -f "$TASK" ] || { echo "cc-estimate: нема task-файлу $TASK" >&2; exit 1; }
+if [ "$COMPARE" = "1" ]; then
+  [ -n "$CHAIN_TASK" ] || { echo "cc-estimate: --compare вимагає --chain-task" >&2; exit 1; }
+  [ -f "$CHAIN_TASK" ] || { echo "cc-estimate: нема chain-task-файлу $CHAIN_TASK" >&2; exit 1; }
+fi
 
 CAP_ENV=${CC_CAP_ENV:-/root/projects/tg_bots/mandrock0_cc_bot/.env}
 CREDS=${CC_PG_CREDS:-/root/ops/cc-runs/creds-pg.env}
@@ -129,6 +137,66 @@ TOK_H=$(fmt_tokens "$TOTAL_TOKENS")
 echo "PREFLIGHT: ~${TOK_H} токенів | ${PCT_5H}% 5h-вікна | ${PCT_7D}% тижня | ~${TOTAL_MIN} хв wall-clock"
 echo "базис: ${BASIS} | впевненість: ${CONF} | ${CAP_BASIS}"
 awk -v p="$PCT_7D" 'BEGIN{ if (p+0 > 40) print "PREFLIGHT: ⚠ дорого" }'
+BASIS_ERR=""
+[ "$HIST_N" -ge 3 ] && BASIS_ERR=38
+echo "VARS: TOKENS=$TOTAL_TOKENS PCT5H=$PCT_5H PCT7D=$PCT_7D MINUTES=$TOTAL_MIN BASIS_N=$HIST_N BASIS_ERR=$BASIS_ERR CONF=$CONF"
+
+# --- --compare: той самий обсяг роботи як ланцюг N послідовних кроків ---
+if [ "$COMPARE" = "1" ]; then
+  CHAIN_HIST_N=0; CHAIN_HIST_TOKENS=""; CHAIN_HIST_MIN_S=""
+  if [ -f "$CREDS" ] && command -v docker >/dev/null 2>&1 && [ -n "${PGPASSWORD:-}" ]; then
+    COUT=$(docker exec -e PGPASSWORD="$PGPASSWORD" "$PG_CONTAINER" \
+      psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -tAc \
+      "SELECT count(*), coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY tokens_in+tokens_out),0), coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_s),0) FROM swarm.runs WHERE model='${CHAIN_MODEL}' AND kind IN ('run','lane','chain') AND status='ok';" \
+      2>/dev/null)
+    if [ -n "$COUT" ]; then
+      CHAIN_HIST_N=$(echo "$COUT" | cut -d'|' -f1 | tr -d '[:space:]')
+      CHAIN_HIST_TOKENS=$(echo "$COUT" | cut -d'|' -f2 | tr -d '[:space:]')
+      CHAIN_HIST_MIN_S=$(echo "$COUT" | cut -d'|' -f3 | tr -d '[:space:]')
+    fi
+  fi
+  CHAIN_HIST_N=${CHAIN_HIST_N:-0}
+  case "$CHAIN_HIST_N" in ''|*[!0-9]*) CHAIN_HIST_N=0 ;; esac
+
+  CT_LINES=$(wc -l < "$CHAIN_TASK" | tr -d '[:space:]')
+  CT_REFS=$(grep -Ec '(^|[[:space:]])/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+' "$CHAIN_TASK" 2>/dev/null || echo 0)
+  [ "$CT_REFS" -gt 0 ] 2>/dev/null || CT_REFS=1
+  CHAIN_SCALE=$(awk -v l="$CT_LINES" -v f="$CT_REFS" 'BEGIN{
+    s = (l/150.0) * (f/5.0);
+    if (s < 0.3) s = 0.3;
+    if (s > 5)   s = 5;
+    printf "%.3f", s
+  }')
+
+  if [ "$CHAIN_HIST_N" -ge 3 ]; then
+    CHAIN_BASE_TOKENS=$CHAIN_HIST_TOKENS
+    CHAIN_BASE_MIN=$(awk -v s="$CHAIN_HIST_MIN_S" 'BEGIN{printf "%.2f", s/60.0}')
+    CHAIN_CONF="висока"
+    CHAIN_BASIS="медіана $CHAIN_HIST_N ранів $CHAIN_MODEL, ±38%"
+  else
+    CHAIN_BASE_TOKENS=$(( $(seed_tokens_in "$CHAIN_MODEL") + $(seed_tokens_out "$CHAIN_MODEL") ))
+    CHAIN_BASE_MIN=$(seed_minutes "$CHAIN_MODEL")
+    CHAIN_CONF="низька"
+    CHAIN_BASIS="сідові значення (історія <3 ранів $CHAIN_MODEL)"
+  fi
+
+  CHAIN_STEP_TOKENS=$(awk -v t="$CHAIN_BASE_TOKENS" -v s="$CHAIN_SCALE" 'BEGIN{printf "%.0f", t*s}')
+  CHAIN_STEP_MIN=$(awk -v m="$CHAIN_BASE_MIN" -v s="$CHAIN_SCALE" 'BEGIN{printf "%.2f", m*s}')
+  CHAIN_TOTAL_TOKENS=$(awk -v st="$CHAIN_STEP_TOKENS" -v n="$LANES" 'BEGIN{printf "%.0f", st*n}')
+  CHAIN_TOTAL_MIN=$(awk -v sm="$CHAIN_STEP_MIN" -v n="$LANES" 'BEGIN{printf "%.1f", sm*n}')
+  CHAIN_PCT_7D=$(awk -v t="$CHAIN_TOTAL_TOKENS" -v c="$P7D_CAP" 'BEGIN{printf "%.1f", (c>0)?(100.0*t/c):0}')
+  CHAIN_TOK_H=$(fmt_tokens "$CHAIN_TOTAL_TOKENS")
+
+  echo "COMPARE: рій ~${TOK_H} токенів / ~${TOTAL_MIN} хв  vs  ланцюг(${LANES}×${CHAIN_MODEL}) ~${CHAIN_TOK_H} токенів / ~${CHAIN_TOTAL_MIN} хв"
+  echo "COMPARE: базис ланцюга — ${CHAIN_BASIS} | впевненість: ${CHAIN_CONF} | ${CHAIN_PCT_7D}% тижня"
+  if [ "$CHAIN_TOTAL_TOKENS" -lt "$TOTAL_TOKENS" ] 2>/dev/null; then
+    echo "COMPARE: переможець за токенами — ланцюг"
+  elif [ "$CHAIN_TOTAL_TOKENS" -gt "$TOTAL_TOKENS" ] 2>/dev/null; then
+    echo "COMPARE: переможець за токенами — рій"
+  else
+    echo "COMPARE: нічия за токенами"
+  fi
+fi
 
 # --- запис у swarm.estimates ДО запуску (лише якщо дали --run-id) ---
 if [ -n "$RUN_ID" ] && [ -f "$CREDS" ] && command -v docker >/dev/null 2>&1 && [ -n "${PGPASSWORD:-}" ]; then

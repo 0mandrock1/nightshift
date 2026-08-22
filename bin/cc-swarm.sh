@@ -30,6 +30,8 @@
 set -u
 
 REPO=${1:?repo}; PLAN=${2:?swarm-plan}; SWARM_ID=${3:?swarm-id}
+ESCALATION_OF=${ESCALATION_OF:-}
+ATTEMPT=1
 RUNS=${CC_RUNS_DIR:-/root/ops/cc-runs}
 SWARMS=${CC_SWARMS_DIR:-/root/ops/cc-swarms}
 MAXPAR=${MAXPAR:-4}
@@ -61,14 +63,72 @@ telemetry_self(){
   PG_USER=${CC_PG_USER:-mandrock}
   NODE=$(hostname -f 2>/dev/null || hostname)
   esc(){ printf '%s' "$1" | sed "s/'/''/g"; }
-  SQL="INSERT INTO swarm.runs (run_id, kind, node, repo, base_sha, started_at, finished_at, status, tokens_in, tokens_out)
+  ESC_OF_SQL="NULL"
+  [ -n "$ESCALATION_OF" ] && ESC_OF_SQL="'$(esc "$ESCALATION_OF")'"
+  SQL="INSERT INTO swarm.runs (run_id, kind, node, repo, base_sha, started_at, finished_at, status, tokens_in, tokens_out, escalation_of, attempt)
     VALUES ('$(esc "$SWARM_ID")', 'swarm', '$(esc "$NODE")', '$(esc "$REPO_ABS")', '$(esc "$BASE_SHA")',
       coalesce((SELECT min(started_at) FROM swarm.runs WHERE parent_run_id='$(esc "$SWARM_ID")'), now()), now(), '$(esc "$STATUS_ARG")',
       coalesce((SELECT sum(tokens_in) FROM swarm.runs WHERE parent_run_id='$(esc "$SWARM_ID")'),0),
-      coalesce((SELECT sum(tokens_out) FROM swarm.runs WHERE parent_run_id='$(esc "$SWARM_ID")'),0))
+      coalesce((SELECT sum(tokens_out) FROM swarm.runs WHERE parent_run_id='$(esc "$SWARM_ID")'),0),
+      $ESC_OF_SQL, $ATTEMPT)
     ON CONFLICT (run_id) DO UPDATE SET finished_at=EXCLUDED.finished_at, status=EXCLUDED.status, tokens_in=EXCLUDED.tokens_in, tokens_out=EXCLUDED.tokens_out;"
   echo "$SQL" | docker exec -i -e PGPASSWORD="$PGPASSWORD" "$PG_CONTAINER" \
     psql -h "${CC_PG_HOST:-127.0.0.1}" -p "${CC_PG_PORT:-5432}" -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -q >/dev/null 2>&1 || true
+}
+
+# --- Стеля ескалацій (§6 SKILL.md): переживає рестарт через swarm.runs.attempt.
+# ESCALATION_OF=<run_id> попереднього рою -> attempt(попередній)>=2 -> відмова
+# ще до будь-якого спавну. Без БД перевірку зробити неможливо -> fail-closed
+# (відмова, не мовчазний дозвіл) — це єдине місце, де відсутність БД блокує ран.
+check_escalation(){
+  [ -n "$ESCALATION_OF" ] || return 0
+  CREDS=${CC_PG_CREDS:-/root/ops/cc-runs/creds-pg.env}
+  PG_CONTAINER=${CC_PG_CONTAINER:-mandrock-kb-postgres}
+  PG_DB=${CC_PG_DB:-mandrock_kb}
+  PG_USER=${CC_PG_USER:-mandrock}
+  PG_HOST=${CC_PG_HOST:-127.0.0.1}
+  PG_PORT=${CC_PG_PORT:-5432}
+  [ -f "$CREDS" ] || die "ескалація $ESCALATION_OF: БД недоступна (нема $CREDS) — fail-closed, стелю ескалацій неможливо перевірити"
+  command -v docker >/dev/null 2>&1 || die "ескалація $ESCALATION_OF: БД недоступна (нема docker) — fail-closed"
+  ESC_PGPASSWORD=$(grep -E '^POSTGRES_PASSWORD=' "$CREDS" 2>/dev/null | head -1 | cut -d= -f2-)
+  [ -n "${ESC_PGPASSWORD:-}" ] || die "ескалація $ESCALATION_OF: БД недоступна (порожній POSTGRES_PASSWORD) — fail-closed"
+  PREV=$(docker exec -e PGPASSWORD="$ESC_PGPASSWORD" "$PG_CONTAINER" \
+    psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -tAc \
+    "SELECT attempt FROM swarm.runs WHERE run_id='$(printf '%s' "$ESCALATION_OF" | sed "s/'/''/g")';" 2>/dev/null)
+  case "${PREV:-}" in '' ) die "ескалація $ESCALATION_OF: попередній ран не знайдено в swarm.runs — fail-closed" ;; esac
+  case "$PREV" in *[!0-9]*) die "ескалація $ESCALATION_OF: attempt не число ('$PREV') — fail-closed" ;; esac
+  [ "$PREV" -lt 2 ] || die "стеля ескалацій вичерпана (attempt=$PREV) — віддай задачу одним звичайним раном"
+  ATTEMPT=$((PREV + 1))
+}
+check_escalation
+
+# --- FACT-блок (best-effort): бере actual з swarm.runs (щойно записаного
+# telemetry_self) і predicted з swarm.estimates (записаного cc-estimate.sh
+# на старті), рендерить через cc-tg-format.sh. Порожній рядок -> викликач
+# падає назад на старий однорядковий текст.
+fact_block(){
+  CC_TG_FORMAT_SH=${CC_TG_FORMAT_SH:-$RUNS/cc-tg-format.sh}
+  [ -x "$CC_TG_FORMAT_SH" ] || return 0
+  CREDS=${CC_PG_CREDS:-/root/ops/cc-runs/creds-pg.env}
+  [ -f "$CREDS" ] || return 0
+  command -v docker >/dev/null 2>&1 || return 0
+  FPGPASSWORD=$(grep -E '^POSTGRES_PASSWORD=' "$CREDS" 2>/dev/null | head -1 | cut -d= -f2-)
+  [ -n "${FPGPASSWORD:-}" ] || return 0
+  ROW=$(docker exec -e PGPASSWORD="$FPGPASSWORD" "${CC_PG_CONTAINER:-mandrock-kb-postgres}" \
+    psql -h "${CC_PG_HOST:-127.0.0.1}" -p "${CC_PG_PORT:-5432}" -U "${CC_PG_USER:-mandrock}" -d "${CC_PG_DB:-mandrock_kb}" -tAc \
+    "SELECT r.tokens_in+r.tokens_out, round(r.duration_s/60.0,1), coalesce(e.predicted_tokens,0), coalesce(e.predicted_minutes,0)
+     FROM swarm.runs r LEFT JOIN swarm.estimates e ON e.run_id=r.run_id
+     WHERE r.run_id='$(printf '%s' "$SWARM_ID" | sed "s/'/''/g")' LIMIT 1;" 2>/dev/null)
+  [ -n "$ROW" ] || return 0
+  F_ATOK=$(echo "$ROW" | cut -d'|' -f1 | tr -d '[:space:]')
+  F_AMIN=$(echo "$ROW" | cut -d'|' -f2 | tr -d '[:space:]')
+  F_PTOK=$(echo "$ROW" | cut -d'|' -f3 | tr -d '[:space:]')
+  F_PMIN=$(echo "$ROW" | cut -d'|' -f4 | tr -d '[:space:]')
+  [ -n "${F_ATOK:-}" ] || return 0
+  sh "$CC_TG_FORMAT_SH" fact --id "$SWARM_ID" --ok "$1" --total "$2" \
+    --actual-tokens "$F_ATOK" --predicted-tokens "${F_PTOK:-0}" \
+    --actual-minutes "${F_AMIN:-0}" --predicted-minutes "${F_PMIN:-0}" \
+    --basis-runs "${V_BASISN:-0}" --basis-err "${V_BASISERR:-}" 2>/dev/null
 }
 
 # --- Лок на swarm-id (mkdir, атомарний; той самий підхід, що й у cc-chain.sh) ---
@@ -90,6 +150,15 @@ while IFS='|' read -r slug task verify model style; do
   SLUGS="$SLUGS $slug"
   [ -f "$task" ] || die "лейн $slug: нема task-файлу $task"
   [ -n "${verify:-}" ] || die "лейн $slug: verify-cmd порожній (заборонено)"
+  VTRIM=$(printf '%s' "$verify" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  case "$VTRIM" in
+    true|:|"exit 0"|"echo ok") die "лейн $slug: verify-cmd '$VTRIM' — точний збіг з фіктивною командою (денилист §8 SKILL.md), не машинний гейт" ;;
+  esac
+  case "$VTRIM" in
+    echo\ *)
+      case "$VTRIM" in *"&&"*|*";"*|*"|"*) : ;; *) die "лейн $slug: verify-cmd '$VTRIM' — голий echo без &&/;/| іншої команди, не гейт" ;; esac
+      ;;
+  esac
 done < "$PLAN_ABS"
 [ "$LANE_N" -gt 0 ] || die "план не містить жодного валідного лейна"
 
@@ -116,6 +185,7 @@ log "рій $SWARM_ID стартував: $LANE_N лейнів, base=$(echo "$BA
 # --- Пре-фліт оцінка (best-effort): перша лейн-модель/task.md як проксі одного лейна ---
 PREFLIGHT=""
 CC_ESTIMATE_SH=${CC_ESTIMATE_SH:-$RUNS/cc-estimate.sh}
+CC_TG_FORMAT_SH=${CC_TG_FORMAT_SH:-$RUNS/cc-tg-format.sh}
 if [ -f "$CC_ESTIMATE_SH" ]; then
   FIRST_MODEL=$(awk -F'|' '$1!="" && $1!~/^#/{print ($4==""?"haiku":$4); exit}' "$PLAN_ABS")
   FIRST_TASK=$(awk -F'|' '$1!="" && $1!~/^#/{print $2; exit}' "$PLAN_ABS")
@@ -124,17 +194,52 @@ if [ -f "$CC_ESTIMATE_SH" ]; then
   [ -n "$PREFLIGHT" ] && log "$PREFLIGHT"
 fi
 
-notify "swarm $SWARM_ID: старт — $LANE_N лейнів, base $(echo "$BASE_SHA" | cut -c1-7)${PREFLIGHT:+ | $PREFLIGHT}"
+PREFLIGHT_TG=""
+VARLINE=$(printf '%s\n' "$PREFLIGHT" | grep '^VARS: ' | head -1)
+if [ -n "$VARLINE" ] && [ -x "$CC_TG_FORMAT_SH" ]; then
+  V_TOKENS=$(printf '%s' "$VARLINE" | sed -n 's/.*TOKENS=\([0-9]*\).*/\1/p')
+  V_PCT5H=$(printf '%s' "$VARLINE" | sed -n 's/.*PCT5H=\([0-9.]*\).*/\1/p')
+  V_PCT7D=$(printf '%s' "$VARLINE" | sed -n 's/.*PCT7D=\([0-9.]*\).*/\1/p')
+  V_MIN=$(printf '%s' "$VARLINE" | sed -n 's/.*MINUTES=\([0-9.]*\).*/\1/p')
+  V_BASISN=$(printf '%s' "$VARLINE" | sed -n 's/.*BASIS_N=\([0-9]*\).*/\1/p')
+  V_BASISERR=$(printf '%s' "$VARLINE" | sed -n 's/.*BASIS_ERR=\([0-9]*\).*/\1/p')
+  V_CONF=$(printf '%s' "$VARLINE" | sed -n 's/.*CONF=\([^ ]*\).*/\1/p')
+  FIRST_TIER=$FIRST_MODEL
+  PREFLIGHT_TG=$(sh "$CC_TG_FORMAT_SH" preflight --id "$SWARM_ID" \
+    --tokens "${V_TOKENS:-0}" --pct5h "${V_PCT5H:-0}" --pct7d "${V_PCT7D:-0}" \
+    --minutes "${V_MIN:-0}" --lanes "$LANE_N" --tier "$FIRST_TIER" --maxpar "$MAXPAR" \
+    --basis-runs "${V_BASISN:-0}" --basis-err "${V_BASISERR:-}" --confidence "${V_CONF:-низька}" 2>/dev/null)
+fi
+
+if [ -n "$PREFLIGHT_TG" ]; then
+  notify "$PREFLIGHT_TG"
+else
+  notify "swarm $SWARM_ID: старт — $LANE_N лейнів, base $(echo "$BASE_SHA" | cut -c1-7)${PREFLIGHT:+ | $PREFLIGHT}"
+fi
+
+# --- π-розсіювання (§5 SKILL.md): {PI_DIGIT} у task.md -> цифра π за індексом лейна ---
+PI_DIGITS="3 1 4 1 5 9 2 6 5 3 5 8 9 7 9 3 2 3 8 4 6 2 6 4 3 3 8 3 2 7"
+pi_digit(){
+  IDX=$1
+  N=$(echo "$PI_DIGITS" | wc -w)
+  [ "$IDX" -ge "$N" ] && log "π-розсіювання: лейн $IDX >= $N цифр у масиві, цикл по колу"
+  POS=$((IDX % N + 1))
+  echo "$PI_DIGITS" | cut -d' ' -f"$POS"
+}
 
 # --- 2/3/4. Спавн лейнів у worktree, зі стелею паралельності ---
 run_lane(){
-  slug=$1; task=$2; verify=$3; model=${4:-haiku}; style=${5:-none}
+  slug=$1; task=$2; verify=$3; model=${4:-haiku}; style=${5:-none}; idx=${6:-0}
   PART="$SWARM_DIR/parts/$slug.tsv"
   WT="$SWARM_DIR/$slug"
   BRANCH="cc/$SWARM_ID/$slug"
   d="$RUNS/${SWARM_ID}-${slug}"
   mkdir -p "$d"
   cp "$task" "$d/task.md"
+  if grep -q '{PI_DIGIT}' "$d/task.md" 2>/dev/null; then
+    DIGIT=$(pi_digit "$idx")
+    sed -i "s/{PI_DIGIT}/$DIGIT/g" "$d/task.md"
+  fi
 
   if [ "$DRYRUN" = "1" ]; then
     printf '%s\tdryrun\tdryrun\tok\tDRYRUN — лейн не спавнено\n' "$slug" > "$PART"
@@ -178,8 +283,12 @@ run_lane(){
     return 2
   fi
 
+  VSTART=$(date +%s)
   ( cd "$WT" && eval "$verify" ) > "$d/verify.log" 2>&1
   VRC=$?
+  VDUR=$(( $(date +%s) - VSTART ))
+  CC_TELEMETRY_SH=${CC_TELEMETRY_SH:-$RUNS/cc-telemetry.sh}
+  [ -x "$CC_TELEMETRY_SH" ] && sh "$CC_TELEMETRY_SH" verification "$d" "$verify" "$VRC" "$VDUR" >/dev/null 2>&1 || true
   if [ "$VRC" = "0" ]; then
     printf '%s\t%s\t%s\tok\t-\n' "$slug" "$RC" "$VRC" > "$PART"
     return 0
@@ -211,15 +320,17 @@ wait_for_slot(){
   done
 }
 
+LANE_IDX=0
 while IFS='|' read -r slug task verify model style; do
   [ -n "${slug:-}" ] || continue
   case "$slug" in \#*) continue ;; esac
 
   wait_for_slot
 
-  run_lane "$slug" "$task" "$verify" "${model:-haiku}" "${style:-none}" &
+  run_lane "$slug" "$task" "$verify" "${model:-haiku}" "${style:-none}" "$LANE_IDX" &
   echo "$!" >> "$PIDS_FILE"
   RUNNING=$((RUNNING+1))
+  LANE_IDX=$((LANE_IDX+1))
 done < "$PLAN_ABS"
 wait
 
@@ -292,13 +403,15 @@ FAIL_LIST=$(awk -F'\t' '$4=="fail" || $4=="timeout"{print $1}' "$MANIFEST" | tr 
 
 log "рій завершено: $OK_N/$LANE_N ok, fanin_rc=$FANIN_RC"
 if [ "$FAIL_N" -eq 0 ] && [ "$FANIN_RC" = "0" ]; then
-  notify "swarm $SWARM_ID: ✅ $OK_N/$LANE_N ok, fan-in ok"
-  echo "worktree remove для прибирання: git -C $REPO_ABS worktree list --porcelain | awk -v d=\"$SWARM_DIR\" '\$1==\"worktree\" && index(\$2,d)==1{print \$2}' | xargs -r -n1 git -C $REPO_ABS worktree remove --force" >> "$SWARM_DIR/swarm.log"
   telemetry_self ok
+  FACT=$(fact_block "$OK_N" "$LANE_N")
+  notify "${FACT:-swarm $SWARM_ID: ✅ $OK_N/$LANE_N ok, fan-in ok}"
+  echo "worktree remove для прибирання: git -C $REPO_ABS worktree list --porcelain | awk -v d=\"$SWARM_DIR\" '\$1==\"worktree\" && index(\$2,d)==1{print \$2}' | xargs -r -n1 git -C $REPO_ABS worktree remove --force" >> "$SWARM_DIR/swarm.log"
   exit 0
 else
-  notify "swarm $SWARM_ID: ❌ $OK_N/$LANE_N ok, fails:${FAIL_LIST:- -}, fanin_rc=$FANIN_RC"
-  echo "worktree remove для прибирання: git -C $REPO_ABS worktree list --porcelain | awk -v d=\"$SWARM_DIR\" '\$1==\"worktree\" && index(\$2,d)==1{print \$2}' | xargs -r -n1 git -C $REPO_ABS worktree remove --force" >> "$SWARM_DIR/swarm.log"
   telemetry_self fail
+  FACT=$(fact_block "$OK_N" "$LANE_N")
+  notify "${FACT:-swarm $SWARM_ID: ❌ $OK_N/$LANE_N ok, fails:${FAIL_LIST:- -}, fanin_rc=$FANIN_RC}"
+  echo "worktree remove для прибирання: git -C $REPO_ABS worktree list --porcelain | awk -v d=\"$SWARM_DIR\" '\$1==\"worktree\" && index(\$2,d)==1{print \$2}' | xargs -r -n1 git -C $REPO_ABS worktree remove --force" >> "$SWARM_DIR/swarm.log"
   exit 2
 fi

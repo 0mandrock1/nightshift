@@ -5,7 +5,51 @@
 #
 #   sh cc-telemetry.sh <run-dir> <kind> [parent-run-id]
 #     kind: run|chain|swarm|lane|fanin
+#   sh cc-telemetry.sh verification <run-dir> <verify-cmd> <exit-code> <duration-s>
+#     INSERT в swarm.verifications (run_id = basename run-dir), той самий
+#     best-effort контракт — ніколи не валить викликача.
 set -u
+
+if [ "${1:-}" = "verification" ]; then
+  shift
+  D=${1:?run-dir}; D=${D%/}
+  VCMD=${2:-}
+  VEXIT=${3:-}
+  VDUR=${4:-0}
+
+  CREDS=${CC_PG_CREDS:-/root/ops/cc-runs/creds-pg.env}
+  LOG=${CC_TELEMETRY_LOG:-/root/ops/cc-runs/telemetry.log}
+  PG_CONTAINER=${CC_PG_CONTAINER:-mandrock-kb-postgres}
+  PG_DB=${CC_PG_DB:-mandrock_kb}
+  PG_USER=${CC_PG_USER:-mandrock}
+  PG_HOST=${CC_PG_HOST:-127.0.0.1}
+  PG_PORT=${CC_PG_PORT:-5432}
+
+  log(){ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG"; }
+  soft(){ log "cc-telemetry(verification): $* — пропущено"; exit 0; }
+
+  [ -f "$CREDS" ] || soft "нема креденшлів $CREDS"
+  command -v docker >/dev/null 2>&1 || soft "нема docker"
+  PGPASSWORD=$(grep -E '^POSTGRES_PASSWORD=' "$CREDS" 2>/dev/null | head -1 | cut -d= -f2-)
+  [ -n "${PGPASSWORD:-}" ] || soft "порожній POSTGRES_PASSWORD у $CREDS"
+
+  esc(){ printf '%s' "$1" | sed "s/'/''/g"; }
+  RUN_ID=$(basename "$D")
+  case "${VEXIT:-}" in ''|*[!0-9]*) VEXIT_SQL="NULL" ;; *) VEXIT_SQL=$VEXIT ;; esac
+  case "${VDUR:-}" in ''|*[!0-9]*) VDUR_SQL="NULL" ;; *) VDUR_SQL=$VDUR ;; esac
+
+  SQL="INSERT INTO swarm.verifications (run_id, verify_cmd, exit_code, duration_s) VALUES ('$(esc "$RUN_ID")', '$(esc "$VCMD")', $VEXIT_SQL, $VDUR_SQL);"
+  echo "$SQL" | docker exec -i -e PGPASSWORD="$PGPASSWORD" "$PG_CONTAINER" \
+    psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -q \
+    > "$LOG.last-verification" 2>&1
+  RC=$?
+  if [ "$RC" != "0" ]; then
+    log "verification INSERT впав для $RUN_ID (rc=$RC): $(tail -3 "$LOG.last-verification" | tr '\n' ' ')"
+    exit 0
+  fi
+  log "verification ok: $RUN_ID exit=$VEXIT dur=${VDUR}s"
+  exit 0
+fi
 
 D=${1:?run-dir}; D=${D%/}
 KIND=${2:?kind}

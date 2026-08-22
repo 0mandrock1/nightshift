@@ -106,6 +106,15 @@ sh tests/run-all.sh
 Усі тести — ізольовані (`mktemp -d`, підставні `CC_RUN_SH`, окрема
 `CC_PG_CREDS=/tmp/.../no-creds`), не чіпають прод-стан і прод-БД.
 
+## Ретеншен worktree/гілок
+
+```sh
+sh bin/cc-gc.sh <repo> [--older-than-days N] [--dry-run]
+```
+
+Прибирає `cc/*/*`-гілки й worktree старші за поріг (дефолт 14д), крім тих,
+що ще не змержені в жодну fanin-гілку чи в main (§9 SKILL.md).
+
 ## Ліцензія
 
 MIT.
