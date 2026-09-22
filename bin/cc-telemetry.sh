@@ -8,7 +8,10 @@
 #   sh cc-telemetry.sh verification <run-dir> <verify-cmd> <exit-code> <duration-s>
 #     INSERT в swarm.verifications (run_id = basename run-dir), той самий
 #     best-effort контракт — ніколи не валить викликача.
+#
+# ENV: CC_RUNS (дефолт $HOME/ops/cc-runs) — тека СТАНУ (creds-pg.env, telemetry.log)
 set -u
+CC_RUNS=${CC_RUNS:-$HOME/ops/cc-runs}
 
 if [ "${1:-}" = "verification" ]; then
   shift
@@ -17,8 +20,8 @@ if [ "${1:-}" = "verification" ]; then
   VEXIT=${3:-}
   VDUR=${4:-0}
 
-  CREDS=${CC_PG_CREDS:-/root/ops/cc-runs/creds-pg.env}
-  LOG=${CC_TELEMETRY_LOG:-/root/ops/cc-runs/telemetry.log}
+  CREDS=${CC_PG_CREDS:-$CC_RUNS/creds-pg.env}
+  LOG=${CC_TELEMETRY_LOG:-$CC_RUNS/telemetry.log}
   PG_CONTAINER=${CC_PG_CONTAINER:-mandrock-kb-postgres}
   PG_DB=${CC_PG_DB:-mandrock_kb}
   PG_USER=${CC_PG_USER:-mandrock}
@@ -55,8 +58,8 @@ D=${1:?run-dir}; D=${D%/}
 KIND=${2:?kind}
 PARENT=${3:-}
 
-CREDS=${CC_PG_CREDS:-/root/ops/cc-runs/creds-pg.env}
-LOG=${CC_TELEMETRY_LOG:-/root/ops/cc-runs/telemetry.log}
+CREDS=${CC_PG_CREDS:-$CC_RUNS/creds-pg.env}
+LOG=${CC_TELEMETRY_LOG:-$CC_RUNS/telemetry.log}
 PG_CONTAINER=${CC_PG_CONTAINER:-mandrock-kb-postgres}
 PG_DB=${CC_PG_DB:-mandrock_kb}
 PG_USER=${CC_PG_USER:-mandrock}
@@ -111,7 +114,9 @@ case "$MODEL_RAW" in
   *)        MODEL=$MODEL_RAW ;;
 esac
 
-NOTES=$(tail -40 "$D/out.log" 2>/dev/null | grep -aE "^[[:space:]]*\**[[:space:]]*NOTES:" | tail -1 | cut -c1-500)
+# iconv -c: ламані UTF-8 байти з out.log (обрізаний multibyte-символ у tail -40
+# тощо) валили UPSERT мовчки — тепер невалідні байти просто відкидаються.
+NOTES=$(tail -40 "$D/out.log" 2>/dev/null | grep -aE "^[[:space:]]*\**[[:space:]]*NOTES:" | tail -1 | cut -c1-500 | iconv -f UTF-8 -t UTF-8 -c)
 
 NODE=$(hostname -f 2>/dev/null || hostname)
 PARENT_SQL="NULL"

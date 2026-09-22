@@ -21,26 +21,42 @@
 #        НЕ блокує решту рою
 #      DRYRUN=1 — уся валідація/worktree/маніфест виконуються, лейни НЕ спавняться
 #      CC_TOOLS, CC_NOTIFY (успадковується cc-run.sh; тут дефолт cc-notify-swarm.sh)
-#      CC_RUNS_DIR (дефолт /root/ops/cc-runs) — тека логів ранів
-#      CC_SWARMS_DIR (дефолт /root/ops/cc-swarms) — тека worktree/маніфестів
-#      CC_RUN_SH (дефолт $CC_RUNS_DIR/cc-run.sh) — біжучий раннер (перевизначається в тестах)
-#      CC_LANE_LOCAL_SH (дефолт $CC_RUNS_DIR/cc-lane-local.sh) — раннер local:* лейнів
+#      CC_RUNS (дефолт $HOME/ops/cc-runs) — тека СТАНУ (run-dirs, локи, логи);
+#        CC_RUNS_DIR лишено як алiас для зворотної сумісності й ЯВНО перевизначає
+#        CC_RUNS для цього процесу (і дочірніх, куди він далі експортується)
+#      CC_SWARMS_DIR (дефолт $HOME/ops/cc-swarms) — тека worktree/маніфестів
+#      CC_RUN_SH (дефолт <bin>/cc-run.sh) — біжучий раннер (перевизначається в тестах)
+#      CC_LANE_LOCAL_SH (дефолт <bin>/cc-lane-local.sh) — раннер local:* лейнів
 #
-# Коди виходу: 0 усі ok (+fan-in ok) | 1 невалідний план | 2 є фейли | 3 session limit
+# Коди виходу: 0 усі ok (+fan-in ok) | 1 невалідний план | 2 є фейли | 3 session limit | 5 тижневий лок
 set -u
+BIN=$(dirname "$(readlink -f "$0")")
+# NODE: CC_RUNS_DIR — старіша назва змінної цього скрипта, лишена як алiас;
+# дефолт-ланцюжок резолвиться через CC_RUNS ($HOME/ops/cc-runs), не хардкод.
+CC_RUNS=${CC_RUNS_DIR:-${CC_RUNS:-$HOME/ops/cc-runs}}
+export CC_RUNS
+
+# --- Тижневий лок (крон cc-week-guard.sh) ---
+# Присутній .week-locked -> тижневого бюджету менше порогу, cc-рани на вузлі
+# заглушено до скидання тижня. Дешева перевірка (без node/jq); знімає лок крон.
+WEEK_LOCK=${CC_WEEK_LOCK:-$CC_RUNS/.week-locked}
+if [ -f "$WEEK_LOCK" ]; then
+  echo "ВІДМОВА: тижневий лок активний ($WEEK_LOCK) — cc-рани заглушено до скидання тижня" >&2
+  exit 5
+fi
 
 REPO=${1:?repo}; PLAN=${2:?swarm-plan}; SWARM_ID=${3:?swarm-id}
 ESCALATION_OF=${ESCALATION_OF:-}
 ATTEMPT=1
-RUNS=${CC_RUNS_DIR:-/root/ops/cc-runs}
-SWARMS=${CC_SWARMS_DIR:-/root/ops/cc-swarms}
+RUNS=$CC_RUNS
+SWARMS=${CC_SWARMS_DIR:-$HOME/ops/cc-swarms}
 MAXPAR=${MAXPAR:-4}
 LANE_TIMEOUT=${LANE_TIMEOUT:-1800}
 DRYRUN=${DRYRUN:-0}
-export CC_NOTIFY=${CC_NOTIFY:-$RUNS/cc-notify-swarm.sh}
+export CC_NOTIFY=${CC_NOTIFY:-$BIN/cc-notify-swarm.sh}
 export CC_TAG=${CC_TAG:-swarm}
-CC_RUN_SH=${CC_RUN_SH:-$RUNS/cc-run.sh}
-CC_LANE_LOCAL_SH=${CC_LANE_LOCAL_SH:-$RUNS/cc-lane-local.sh}
+CC_RUN_SH=${CC_RUN_SH:-$BIN/cc-run.sh}
+CC_LANE_LOCAL_SH=${CC_LANE_LOCAL_SH:-$BIN/cc-lane-local.sh}
 
 REPO_ABS=$(cd "$REPO" 2>/dev/null && pwd) || { echo "repo не існує: $REPO" >&2; exit 1; }
 PLAN_ABS=$(readlink -f "$PLAN" 2>/dev/null) || { echo "план не існує: $PLAN" >&2; exit 1; }
@@ -53,7 +69,7 @@ die(){ echo "cc-swarm: $*" >&2; notify "swarm $SWARM_ID: ВІДМОВА — $*";
 # уже записаних дочірньою телеметрією cc-run.sh. Ніколи не валить рій.
 telemetry_self(){
   STATUS_ARG=$1
-  CREDS=${CC_PG_CREDS:-/root/ops/cc-runs/creds-pg.env}
+  CREDS=${CC_PG_CREDS:-$RUNS/creds-pg.env}
   [ -f "$CREDS" ] || return 0
   command -v docker >/dev/null 2>&1 || return 0
   PGPASSWORD=$(grep -E '^POSTGRES_PASSWORD=' "$CREDS" 2>/dev/null | head -1 | cut -d= -f2-)
@@ -82,7 +98,7 @@ telemetry_self(){
 # (відмова, не мовчазний дозвіл) — це єдине місце, де відсутність БД блокує ран.
 check_escalation(){
   [ -n "$ESCALATION_OF" ] || return 0
-  CREDS=${CC_PG_CREDS:-/root/ops/cc-runs/creds-pg.env}
+  CREDS=${CC_PG_CREDS:-$RUNS/creds-pg.env}
   PG_CONTAINER=${CC_PG_CONTAINER:-mandrock-kb-postgres}
   PG_DB=${CC_PG_DB:-mandrock_kb}
   PG_USER=${CC_PG_USER:-mandrock}
@@ -107,9 +123,9 @@ check_escalation
 # на старті), рендерить через cc-tg-format.sh. Порожній рядок -> викликач
 # падає назад на старий однорядковий текст.
 fact_block(){
-  CC_TG_FORMAT_SH=${CC_TG_FORMAT_SH:-$RUNS/cc-tg-format.sh}
+  CC_TG_FORMAT_SH=${CC_TG_FORMAT_SH:-$BIN/cc-tg-format.sh}
   [ -x "$CC_TG_FORMAT_SH" ] || return 0
-  CREDS=${CC_PG_CREDS:-/root/ops/cc-runs/creds-pg.env}
+  CREDS=${CC_PG_CREDS:-$RUNS/creds-pg.env}
   [ -f "$CREDS" ] || return 0
   command -v docker >/dev/null 2>&1 || return 0
   FPGPASSWORD=$(grep -E '^POSTGRES_PASSWORD=' "$CREDS" 2>/dev/null | head -1 | cut -d= -f2-)
@@ -184,8 +200,8 @@ log "рій $SWARM_ID стартував: $LANE_N лейнів, base=$(echo "$BA
 
 # --- Пре-фліт оцінка (best-effort): перша лейн-модель/task.md як проксі одного лейна ---
 PREFLIGHT=""
-CC_ESTIMATE_SH=${CC_ESTIMATE_SH:-$RUNS/cc-estimate.sh}
-CC_TG_FORMAT_SH=${CC_TG_FORMAT_SH:-$RUNS/cc-tg-format.sh}
+CC_ESTIMATE_SH=${CC_ESTIMATE_SH:-$BIN/cc-estimate.sh}
+CC_TG_FORMAT_SH=${CC_TG_FORMAT_SH:-$BIN/cc-tg-format.sh}
 if [ -f "$CC_ESTIMATE_SH" ]; then
   FIRST_MODEL=$(awk -F'|' '$1!="" && $1!~/^#/{print ($4==""?"haiku":$4); exit}' "$PLAN_ABS")
   FIRST_TASK=$(awk -F'|' '$1!="" && $1!~/^#/{print $2; exit}' "$PLAN_ABS")
@@ -287,7 +303,7 @@ run_lane(){
   ( cd "$WT" && eval "$verify" ) > "$d/verify.log" 2>&1
   VRC=$?
   VDUR=$(( $(date +%s) - VSTART ))
-  CC_TELEMETRY_SH=${CC_TELEMETRY_SH:-$RUNS/cc-telemetry.sh}
+  CC_TELEMETRY_SH=${CC_TELEMETRY_SH:-$BIN/cc-telemetry.sh}
   [ -x "$CC_TELEMETRY_SH" ] && sh "$CC_TELEMETRY_SH" verification "$d" "$verify" "$VRC" "$VDUR" >/dev/null 2>&1 || true
   if [ "$VRC" = "0" ]; then
     printf '%s\t%s\t%s\tok\t-\n' "$slug" "$RC" "$VRC" > "$PART"

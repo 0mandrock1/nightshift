@@ -46,7 +46,8 @@ if [ "$COMPARE" = "1" ]; then
 fi
 
 CAP_ENV=${CC_CAP_ENV:-/root/projects/tg_bots/mandrock0_cc_bot/.env}
-CREDS=${CC_PG_CREDS:-/root/ops/cc-runs/creds-pg.env}
+CC_RUNS=${CC_RUNS:-$HOME/ops/cc-runs}
+CREDS=${CC_PG_CREDS:-$CC_RUNS/creds-pg.env}
 PG_CONTAINER=${CC_PG_CONTAINER:-mandrock-kb-postgres}
 PG_DB=${CC_PG_DB:-mandrock_kb}
 PG_USER=${CC_PG_USER:-mandrock}
@@ -264,7 +265,7 @@ if [ -n "$RUN_ID" ] && [ -f "$CREDS" ] && command -v docker >/dev/null 2>&1 && [
   SQL="INSERT INTO swarm.estimates (run_id, predicted_tokens, predicted_minutes, predicted_pct_5h, predicted_pct_week, estimator_version) VALUES ('$(printf '%s' "$RUN_ID" | sed "s/'/''/g")', $TOTAL_TOKENS, $TOTAL_MIN, $PCT_5H, $PCT_7D, 'cc-estimate/2');"
   echo "$SQL" | docker exec -i -e PGPASSWORD="$PGPASSWORD" "$PG_CONTAINER" \
     psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -q \
-    >/root/ops/cc-runs/telemetry.log.est 2>&1 || true
+    >"${CC_TELEMETRY_LOG:-$CC_RUNS/telemetry.log}.est" 2>&1 || true
 fi
 
 exit 0
