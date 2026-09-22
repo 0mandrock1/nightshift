@@ -2,3 +2,16 @@
 *.tsv
 .pids*
 .limit
+
+# secrets / node-local credentials (never committed — see *.env.example)
+bin/notify.env
+bin/notify-swarm.env
+*.bak
+*.bak.*
+*.bak-*
+
+# run-artifact directories dropped next to scripts by ad-hoc local testing
+run-*/
+.week-locked
+creds-*.env
+
