@@ -4,7 +4,9 @@ set -u
 OPS=/root/ops/cc-runs
 cp /root/projects/cc-swarm/ops/cutover-e1b.sh /root/projects/cc-swarm/ops/rollback-e1b.sh /tmp/
 P='claude'' -p'
-note(){ sh "$OPS/cc-notify.sh" "🔀 e1b-cutover · $1" 2>/dev/null || true; }
+# rc і stderr нотифікації — у notify-debug.log бекап-теки (як у cc-run.sh),
+# не в /dev/null; best-effort — ніколи не валить waiter.
+note(){ { echo "--- note $(date -u +%FT%TZ) ---"; sh "$OPS/cc-notify.sh" "🔀 e1b-cutover · $1"; echo "note rc=$?"; } >>"${BK:-/tmp}/notify-debug.log" 2>&1 || true; }
 
 defer_soon(){
   now=$(date +%s)

@@ -55,6 +55,26 @@ grep -q "^КОНТРАКТ ВИВОДУ" "$D/task.md" 2>/dev/null || cat >> "$D/
 КОНТРАКТ ВИВОДУ (обов'язково, незалежно від стилю відповіді вище): останній рядок усієї відповіді — рівно "RESULT: ok" або "RESULT: fail", без зірочок, без тексту після нього. Людський підсумок вище — ОК, але цей рядок йде строго останнім.
 RESULTCONTRACT
 
+# Sync-only: дописати обов'язкову секцію, якщо автор task.md її забув.
+# Env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 фон НЕ забороняє (22.09, R4/R5).
+grep -q '^## Sync-only' "$D/task.md" 2>/dev/null || cat >> "$D/task.md" <<'SYNCONLY'
+
+## Sync-only
+Жодних run_in_background, Monitor, фонових poller-ів, фонових Task-сабагентів,
+`&` на команді, результат якої ти потім чекаєш (тест, білд, verify). Виняток —
+демон (systemd/setsid) з чекпоінтом: запустив і НЕ чекаєш, двічі міряєш
+лічильник прогресу. У `-p`-режимі нема механізму
+отримати нотифікацію про завершення фонової задачі: закінчив хід «чекаю
+монітор» — сесія виходить без RESULT, робота зараховується як провал.
+Чекати можна лише синхронно, в межах одного Bash-виклику, з лімітом:
+  i=0; until <перевірка>; do i=$((i+1)); [ $i -ge 10 ] && break; sleep 10; done
+Дефолтний timeout Bash-виклику — 120 с: цикл довший за це вбʼється посередині.
+Треба довше — явний параметр timeout виклику (до 600000 мс), не фон.
+Ліміт вичерпано — це факт для NOTES і RESULT: fail, не привід чекати далі.
+Довше ніж ран (години) — не чекати взагалі, а той самий демон з чекпоінтом.
+Останній хід сесії — завжди блок Report, ніколи «чекаю».
+SYNCONLY
+
 pwd > "$D/cwd" 2>/dev/null || true
 ID=$(basename "$D")
 TOOLS=${CC_TOOLS:-"Bash Edit Write Read Glob Grep"}
@@ -79,6 +99,16 @@ notify(){ [ -f "$NOTIFY" ] || return 0; { echo "--- notify $(date -u +%FT%TZ) --
 notify_silent(){ [ -f "$NOTIFY" ] || return 0; { echo "--- notify_silent $(date -u +%FT%TZ) ---"; sh "$NOTIFY" "$1" silent; echo "notify_silent rc=$?"; } >>"$D/notify-debug.log" 2>&1 || true; }
 # Екранування під HTML parse_mode Telegram (див. cc-notify.sh).
 esc(){ printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+# Причина провалу без RESULT: фонове очікування чи ні. Код виходу не міняє —
+# лише мітка в fail_reason/лог/нотифікацію, щоб статистика не плутала BG-WAIT
+# з провалом задачі.
+fail_reason(){
+  if tail -60 "$1/out.log" 2>/dev/null | grep -aqiE 'background|run_in_background|фонов|монітор|monitor|poller|чекаю'; then
+    echo BG-WAIT
+  else
+    echo NO-RESULT
+  fi
+}
 
 # Пре-фліт оцінка перед спавном — у лог і в стартову нотифікацію (best-effort).
 ESTIMATE_SH="$BIN/cc-estimate.sh"
@@ -109,10 +139,15 @@ if [ "$BACKEND" = "codex" ]; then
     -C "$PWD" -o "$D/last-message.txt" "$(cat "$D/task.md")" \
     < /dev/null > "$D/out.log" 2>&1
 elif [ "$STYLE" = "none" ]; then
-  env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$D/task.md")" $MODELARG $SESSARG --permission-mode acceptEdits \
+  # RUN_TIMEOUT_S: жорсткий backstop поверх CEILING_MS вище — той лише робить
+  # очікування видимим (один рядок у out.log), але сам по собі не обмежує
+  # його в часі (як у cc-chain.sh).
+  RUN_TIMEOUT_S=${CC_RUN_TIMEOUT_S:-2700}
+  timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$D/task.md")" $MODELARG $SESSARG --permission-mode acceptEdits \
     --allowedTools "$TOOLS" < /dev/null > "$D/out.log" 2>&1
 else
-  env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$D/task.md")" $MODELARG $SESSARG --permission-mode acceptEdits \
+  RUN_TIMEOUT_S=${CC_RUN_TIMEOUT_S:-2700}
+  timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$D/task.md")" $MODELARG $SESSARG --permission-mode acceptEdits \
     --allowedTools "$TOOLS" --settings "{\"outputStyle\":\"$STYLE\"}" < /dev/null > "$D/out.log" 2>&1
 fi
 RC=$?
@@ -152,8 +187,12 @@ fi
 # Нема рядка RESULT. claude завершився чисто (RC=0) — це формат-провал агента
 # (забув Report-блок), не провал задачі; не позначати як fail наосліп.
 if [ "$RC" = 0 ]; then
-  notify "⚠️ $TAG · ambiguous · <code>$ID</code> · exit 0, нема RESULT — перевір out.log вручну${NOTES:+ · $(esc "$NOTES")}"
+  R=$(fail_reason "$D"); echo "$R" > "$D/fail_reason"
+  notify "⚠️ $TAG · ambiguous · <code>$ID</code> · exit 0, нема RESULT ($R) — перевір out.log вручну${NOTES:+ · $(esc "$NOTES")}"
   exit 4
 fi
-notify "❌ $TAG · fail · <code>$ID</code> · exit $RC · нема рядка RESULT у хвості логу${NOTES:+ · $(esc "$NOTES")}"
+R=$(fail_reason "$D"); echo "$R" > "$D/fail_reason"
+WHY="нема рядка RESULT у хвості логу, $R"
+[ "$RC" = 124 ] && WHY="$WHY, timeout ${RUN_TIMEOUT_S:-2700}s"
+notify "❌ $TAG · fail · <code>$ID</code> · exit $RC · $WHY${NOTES:+ · $(esc "$NOTES")}"
 exit 2

@@ -135,6 +135,39 @@ resolve_style(){
   esac
 }
 
+# Sync-only: дописати обов'язкову секцію, якщо автор task.md її забув.
+# Env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 фон НЕ забороняє (22.09, R4/R5).
+sync_only(){
+  grep -q '^## Sync-only' "$1" 2>/dev/null && return 0
+  cat >> "$1" <<'SYNCONLY'
+
+## Sync-only
+Жодних run_in_background, Monitor, фонових poller-ів, фонових Task-сабагентів,
+`&` на команді, результат якої ти потім чекаєш (тест, білд, verify). Виняток —
+демон (systemd/setsid) з чекпоінтом: запустив і НЕ чекаєш, двічі міряєш
+лічильник прогресу. У `-p`-режимі нема механізму
+отримати нотифікацію про завершення фонової задачі: закінчив хід «чекаю
+монітор» — сесія виходить без RESULT, робота зараховується як провал.
+Чекати можна лише синхронно, в межах одного Bash-виклику, з лімітом:
+  i=0; until <перевірка>; do i=$((i+1)); [ $i -ge 10 ] && break; sleep 10; done
+Дефолтний timeout Bash-виклику — 120 с: цикл довший за це вбʼється посередині.
+Треба довше — явний параметр timeout виклику (до 600000 мс), не фон.
+Ліміт вичерпано — це факт для NOTES і RESULT: fail, не привід чекати далі.
+Довше ніж ран (години) — не чекати взагалі, а той самий демон з чекпоінтом.
+Останній хід сесії — завжди блок Report, ніколи «чекаю».
+SYNCONLY
+}
+# Причина провалу без RESULT: фонове очікування чи ні. Код виходу не міняє —
+# лише мітка в fail_reason/лог/нотифікацію, щоб статистика не плутала BG-WAIT
+# з провалом задачі.
+fail_reason(){
+  if tail -60 "$1/out.log" 2>/dev/null | grep -aqiE 'background|run_in_background|фонов|монітор|monitor|poller|чекаю'; then
+    echo BG-WAIT
+  else
+    echo NO-RESULT
+  fi
+}
+
 do_run(){
   slug=$1; style=$2; task=$3; model=${4:-}
   # 11.09: порожнє поле мало давати sonnet-дефолт (cc-preferences 27.08), а
@@ -152,6 +185,7 @@ do_run(){
   git rev-parse HEAD > "$d/base_sha"
   git checkout -q -b "cc/$id" || { log "$id: не змогло створити гілку"; exit 1; }
   sed "s|{RUN_ID}|$id|g" "$task" > "$d/task.md"
+  sync_only "$d/task.md"
   # Гарантія RESULT: той самий контракт, що й у cc-run.sh — дописуємо в кінець
   # ПРОМПТУ, бо модель надійніше слухає останній рядок.
   cat >> "$d/task.md" <<'RESULTCONTRACT'
@@ -207,17 +241,22 @@ RESULTCONTRACT
       if tail -40 "$d/out.log" | grep -aqE "RESULT:[[:space:]]*\**[[:space:]]*fail"; then
         RMSG="RESULT: fail"
       else
-        RMSG="RESULT відсутній"
+        R=$(fail_reason "$d"); echo "$R" > "$d/fail_reason"
+        RMSG="RESULT відсутній, $R"
       fi
       log "$id: AMBIGUOUS — claude завершився чисто, $RMSG — ланцюг спинено для ручної перевірки, гілка лишена"
       echo 4 > "$d/exit_code"
       [ -f "$BIN/cc-telemetry.sh" ] && sh "$BIN/cc-telemetry.sh" "$d" run >/dev/null 2>&1
       notify "⚠️ $TAG · ambiguous · <code>$id</code> · $PASSED ok до цього · exit 4 · $RMSG, перевір вручну · гілку лишено"; exit 4
     fi
-    log "$id: FAIL — ланцюг спинено, гілка лишена як є для розбору"
+    R=OK-FAIL
+    tail -40 "$d/out.log" | grep -aqE "RESULT:[[:space:]]*\**[[:space:]]*fail" || R=$(fail_reason "$d")
+    [ "$CLAUDE_EXIT" = 124 ] && R="$R+TIMEOUT"
+    echo "$R" > "$d/fail_reason"
+    log "$id: FAIL [$R] — ланцюг спинено, гілка лишена як є для розбору"
     echo 2 > "$d/exit_code"
     [ -f "$BIN/cc-telemetry.sh" ] && sh "$BIN/cc-telemetry.sh" "$d" run >/dev/null 2>&1
-    notify "❌ $TAG · run fail · <code>$id</code> · $PASSED ok до цього · exit 2 · гілку лишено"; exit 2
+    notify "❌ $TAG · run fail [$R] · <code>$id</code> · $PASSED ok до цього · exit 2 · гілку лишено"; exit 2
   fi
 }
 
