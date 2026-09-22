@@ -46,7 +46,7 @@ if [ "$COMPARE" = "1" ]; then
 fi
 
 CAP_ENV=${CC_CAP_ENV:-/root/projects/tg_bots/mandrock0_cc_bot/.env}
-CC_RUNS=${CC_RUNS:-$HOME/ops/cc-runs}
+CC_RUNS=${CC_RUNS:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs}
 CREDS=${CC_PG_CREDS:-$CC_RUNS/creds-pg.env}
 PG_CONTAINER=${CC_PG_CONTAINER:-mandrock-kb-postgres}
 PG_DB=${CC_PG_DB:-mandrock_kb}

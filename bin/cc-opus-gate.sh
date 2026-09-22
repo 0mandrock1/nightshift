@@ -14,7 +14,7 @@
 set -u
 MODEL=${1:-}
 RUN_ID=${2:-?}
-CC_RUNS=${CC_RUNS:-$HOME/ops/cc-runs}
+CC_RUNS=${CC_RUNS:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs}
 LOG=${CC_TELEMETRY_LOG:-$CC_RUNS/telemetry.log}
 
 case "$MODEL" in

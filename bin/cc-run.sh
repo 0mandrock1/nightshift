@@ -7,7 +7,7 @@
 #     <run-dir>  тека рану, у якій ВЖЕ лежить task.md
 #     style      ponytail | caveman | none (дефолт none = без --settings)
 #
-# ENV: CC_RUNS   (дефолт $HOME/ops/cc-runs) — тека СТАНУ (run-dirs, локи,
+# ENV: CC_RUNS   (дефолт $(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs) — тека СТАНУ (run-dirs, локи,
 #                логи); експортується для дочірніх процесів
 #      CC_TOOLS  (дефолт "Bash Edit Write Read Glob Grep")
 #      CC_NOTIFY (дефолт <bin>/cc-notify.sh; нема файлу — нотифікація тихо
@@ -29,7 +29,7 @@ export PATH
 CC_CLAUDE_BIN=${CC_CLAUDE_BIN:-claude}
 
 BIN=$(dirname "$(readlink -f "$0")")
-CC_RUNS=${CC_RUNS:-$HOME/ops/cc-runs}
+CC_RUNS=${CC_RUNS:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs}
 export CC_RUNS
 
 # --- Тижневий лок (крон cc-week-guard.sh) ---

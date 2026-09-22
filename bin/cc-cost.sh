@@ -8,7 +8,7 @@
 # тому «sonnet-еквівалент» для opus-рану — це просто /5.
 set -u
 D=${1:?run-dir}; D=${D%/}
-CC_RUNS=${CC_RUNS:-$HOME/ops/cc-runs}
+CC_RUNS=${CC_RUNS:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs}
 LOG=${CC_TELEMETRY_LOG:-$CC_RUNS/telemetry.log}
 [ -f "$D/usage.json" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0

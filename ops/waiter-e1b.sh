@@ -24,7 +24,16 @@ while :; do
   sleep 60
 done
 
-OUT=$(sh /tmp/cutover-e1b.sh 2>&1) || { note "ABORT до мутації: $(echo "$OUT" | tail -1)"; exit 1; }
+rm -f /tmp/e1b-bk
+OUT=$(sh /tmp/cutover-e1b.sh 2>&1) || {
+  if [ -f /tmp/e1b-bk ]; then
+    sh /tmp/rollback-e1b.sh "$(cat /tmp/e1b-bk)" >/dev/null 2>&1
+    note "ABORT після мутації: $(echo "$OUT" | tail -1) — відкочено"
+  else
+    note "ABORT до мутації: $(echo "$OUT" | tail -1)"
+  fi
+  exit 1
+}
 BK=$(echo "$OUT" | tail -1)
 
 fail(){ sh /tmp/rollback-e1b.sh "$BK" >/dev/null 2>&1; note "VERIFY FAIL ($1) — відкочено, бекап $BK"; exit 1; }

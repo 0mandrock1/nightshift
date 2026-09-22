@@ -6,11 +6,11 @@
 # DRYRUN=1 -> лише друкує намір, файл/нотифікацію не чіпає.
 # Fail-open: число недоступне -> нічого не робить (не локає на порожнечі).
 #
-# ENV: CC_RUNS (дефолт $HOME/ops/cc-runs) — тека СТАНУ (.week-locked)
+# ENV: CC_RUNS (дефолт $(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs) — тека СТАНУ (.week-locked)
 set -u
 export PATH=/usr/local/bin:/usr/bin:/bin
 BIN=$(dirname "$(readlink -f "$0")")
-CC_RUNS=${CC_RUNS:-$HOME/ops/cc-runs}
+CC_RUNS=${CC_RUNS:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs}
 export CC_RUNS
 LOCK="$CC_RUNS/.week-locked"
 THRESH=${CC_WEEK_MIN_LEFT:-5}

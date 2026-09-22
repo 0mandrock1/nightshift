@@ -36,6 +36,7 @@ done
 mkdir -p "$BK"
 for f in $CORE $REPOINT; do cp -a "$OPS/$f.sh" "$BK/"; done
 echo "$TS" > "$BK/ts"
+echo "$BK" > /tmp/e1b-bk
 
 # 2. main := e1b-canon (update-ref зі звіркою старого значення, дерево не міняється)
 git -C "$OLD" update-ref refs/heads/main "$(git -C "$OLD" rev-parse e1b-canon)" "$BASE"

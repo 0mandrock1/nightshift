@@ -21,10 +21,10 @@
 #        НЕ блокує решту рою
 #      DRYRUN=1 — уся валідація/worktree/маніфест виконуються, лейни НЕ спавняться
 #      CC_TOOLS, CC_NOTIFY (успадковується cc-run.sh; тут дефолт cc-notify-swarm.sh)
-#      CC_RUNS (дефолт $HOME/ops/cc-runs) — тека СТАНУ (run-dirs, локи, логи);
+#      CC_RUNS (дефолт $(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs) — тека СТАНУ (run-dirs, локи, логи);
 #        CC_RUNS_DIR лишено як алiас для зворотної сумісності й ЯВНО перевизначає
 #        CC_RUNS для цього процесу (і дочірніх, куди він далі експортується)
-#      CC_SWARMS_DIR (дефолт $HOME/ops/cc-swarms) — тека worktree/маніфестів
+#      CC_SWARMS_DIR (дефолт $(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-swarms) — тека worktree/маніфестів
 #      CC_RUN_SH (дефолт <bin>/cc-run.sh) — біжучий раннер (перевизначається в тестах)
 #      CC_LANE_LOCAL_SH (дефолт <bin>/cc-lane-local.sh) — раннер local:* лейнів
 #
@@ -32,8 +32,8 @@
 set -u
 BIN=$(dirname "$(readlink -f "$0")")
 # NODE: CC_RUNS_DIR — старіша назва змінної цього скрипта, лишена як алiас;
-# дефолт-ланцюжок резолвиться через CC_RUNS ($HOME/ops/cc-runs), не хардкод.
-CC_RUNS=${CC_RUNS_DIR:-${CC_RUNS:-$HOME/ops/cc-runs}}
+# дефолт-ланцюжок резолвиться через CC_RUNS ($(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs), не хардкод.
+CC_RUNS=${CC_RUNS_DIR:-${CC_RUNS:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs}}
 export CC_RUNS
 
 # --- Тижневий лок (крон cc-week-guard.sh) ---
@@ -49,7 +49,7 @@ REPO=${1:?repo}; PLAN=${2:?swarm-plan}; SWARM_ID=${3:?swarm-id}
 ESCALATION_OF=${ESCALATION_OF:-}
 ATTEMPT=1
 RUNS=$CC_RUNS
-SWARMS=${CC_SWARMS_DIR:-$HOME/ops/cc-swarms}
+SWARMS=${CC_SWARMS_DIR:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-swarms}
 MAXPAR=${MAXPAR:-4}
 LANE_TIMEOUT=${LANE_TIMEOUT:-1800}
 DRYRUN=${DRYRUN:-0}

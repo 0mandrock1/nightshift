@@ -9,9 +9,9 @@
 #     INSERT в swarm.verifications (run_id = basename run-dir), той самий
 #     best-effort контракт — ніколи не валить викликача.
 #
-# ENV: CC_RUNS (дефолт $HOME/ops/cc-runs) — тека СТАНУ (creds-pg.env, telemetry.log)
+# ENV: CC_RUNS (дефолт $(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs) — тека СТАНУ (creds-pg.env, telemetry.log)
 set -u
-CC_RUNS=${CC_RUNS:-$HOME/ops/cc-runs}
+CC_RUNS=${CC_RUNS:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs}
 
 if [ "${1:-}" = "verification" ]; then
   shift

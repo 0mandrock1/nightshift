@@ -11,7 +11,7 @@
 #          model-router-runfile/output-style-tracking; призначає вузол, не чат)
 # У task.md плейсхолдер {RUN_ID} підставляється реальним id рану.
 #
-# ENV: CC_RUNS  (дефолт $HOME/ops/cc-runs) — тека СТАНУ (run-dirs, локи,
+# ENV: CC_RUNS  (дефолт $(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs) — тека СТАНУ (run-dirs, локи,
 #               .style-index, .pi-digits, лог-файли ланцюга); експортується
 #               для дочірніх процесів (cc-run.sh тощо)
 #      CC_EXTRA_PATH  (дефолт порожньо) — префікс до PATH ПЕРЕД спавном claude
@@ -25,10 +25,10 @@ export PATH
 CC_CLAUDE_BIN=${CC_CLAUDE_BIN:-claude}
 
 BIN=$(dirname "$(readlink -f "$0")")
-# NODE: дефолт $HOME/ops/cc-runs — резолвиться в /root/ops/cc-runs на VPS
+# NODE: дефолт $(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs — резолвиться в /root/ops/cc-runs на VPS
 # (root), у ~/ops/cc-runs на десктопі. Раніше desktop-копія мовчки писала
 # у VPS-шлях (хардкод /root/ops/cc-runs) — це і був задокументований баг.
-CC_RUNS=${CC_RUNS:-$HOME/ops/cc-runs}
+CC_RUNS=${CC_RUNS:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs}
 export CC_RUNS
 RUNS=$CC_RUNS
 

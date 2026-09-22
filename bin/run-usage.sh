@@ -3,11 +3,11 @@
 # і сумує токени по моделях. Пише <run-dir>/usage.json, друкує один рядок.
 #   sh run-usage.sh <run-dir>
 #
-# ENV: CC_CLAUDE_PROJECTS (дефолт $HOME/.claude/projects) — тека, де Claude Code
+# ENV: CC_CLAUDE_PROJECTS (дефолт $(getent passwd "$(id -un)" | cut -d: -f6)/.claude/projects) — тека, де Claude Code
 #      тримає session-jsonl транскрипти
 set -u
 D=${1:?run-dir}; D=${D%/}
-CC_CLAUDE_PROJECTS=${CC_CLAUDE_PROJECTS:-$HOME/.claude/projects}
+CC_CLAUDE_PROJECTS=${CC_CLAUDE_PROJECTS:-$(getent passwd "$(id -un)" | cut -d: -f6)/.claude/projects}
 [ -f "$D/task.md" ] || { echo "usage: нема task.md у $D"; exit 1; }
 START=$(stat -c %Y "$D/task.md")
 END=$([ -f "$D/out.log" ] && stat -c %Y "$D/out.log" || date +%s)
