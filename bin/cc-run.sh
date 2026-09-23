@@ -92,6 +92,8 @@ SYNCONLY
 
 pwd > "$D/cwd" 2>/dev/null || true
 ID=$(basename "$D")
+# {RUN_ID} → реальний id рану, як у cc-chain.sh (раніше одиночний ран лишав плейсхолдер буквально).
+sed "s|{RUN_ID}|$ID|g" "$D/task.md" > "$D/task.md.tmp" && mv "$D/task.md.tmp" "$D/task.md"
 TOOLS=${CC_TOOLS:-"Bash Edit Write Read Glob Grep"}
 NOTIFY=${CC_NOTIFY:-$BIN/cc-notify.sh}
 TAG=${CC_TAG:-run}
