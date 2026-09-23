@@ -18,7 +18,7 @@
 #                 вузлах, де `claude` стоїть поза стандартним PATH
 #                 неінтерактивного sh (напр. ~/.local/bin на WSL/десктопі)
 #
-# Коди виходу: 0 ok | 2 fail (нема RESULT: ok) | 3 session limit | 5 тижневий лок | 6 гард дорогої моделі
+# Коди виходу: 0 ok | 2 fail (нема RESULT: ok) | 3 session limit | 5 тижневий лок | 6 гард дорогої моделі | 7 вже йде ран у run-dir
 set -u
 
 # NODE: на деяких вузлах `claude` стоїть поза PATH неінтерактивного sh
@@ -46,6 +46,21 @@ STYLE=${2:-none}
 MODEL=${3:-}
 BACKEND=${4:-claude}
 [ -f "$D/task.md" ] || { echo "cc-run: нема $D/task.md" >&2; exit 1; }
+
+# --- Гард повторного запуску в ту саму run-dir (mkdir атомарний) ---
+if mkdir "$D/.running" 2>/dev/null; then
+  echo "$$" > "$D/.running/pid"
+  trap 'rm -rf "$D/.running"' EXIT INT TERM HUP
+else
+  OLDPID=$(cat "$D/.running/pid" 2>/dev/null)
+  if [ -n "$OLDPID" ] && kill -0 "$OLDPID" 2>/dev/null; then
+    echo "cc-run: в $D вже йде ран (pid $OLDPID)" >&2
+    exit 7
+  fi
+  echo "cc-run: stale-лок у $D/.running (pid ${OLDPID:-?} мертвий) — забираю" >&2
+  echo "$$" > "$D/.running/pid"
+  trap 'rm -rf "$D/.running"' EXIT INT TERM HUP
+fi
 # Гарантія RESULT: незалежно від того, чи task.md сам про це попросив і чи
 # стиль (ponytail тощо) це перебив людським підсумком — дописуємо контракт
 # в кінець ПРОМПТУ (не в середину), бо модель надійніше слухає останній рядок.
