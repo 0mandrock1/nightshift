@@ -212,3 +212,61 @@ cd /tmp/codex-live-ns-codex-live-20260923-0312 && CC_TAG=codex-smoke sh /root/pr
 CC_TAG=codex-smoke sh /root/projects/nightshift/bin/cc-run.sh /tmp/codex-live-ns-codex-live-20260923-0312-run-opusgate none opus codex
 ```
 exit **6**, повідомлення `ВІДМОВА opus-gate: ... просить opus без CC_OPUS_REASON`. Run-dir після відмови містить лише `cwd`/`session_id`/`task.md` — **нема `events.jsonl`/`last-message.txt`**, тобто `codex exec` не спавнився (гард спрацював до виклику бінарника, не після).
+
+## Автокоміт для BACKEND=codex (варіант (a), 2026-09-23)
+
+Live smoke вище (перший прогін) вже показав першопричину: `.git` у sandbox
+`workspace-write` доступний лише на читання (`index.lock` не пишеться), тож
+будь-яка спроба `git commit` **зсередини** `codex exec` падає. Для одиночних
+ранів через `cc-chain.sh` це не проблема — ланцюг сам робить
+`git add -A && git commit` у батьківському процесі, ПОЗА sandbox, одразу
+після завершення `codex exec` (той самий код, що й для `claude`-бекенду,
+`bin/cc-chain.sh` `do_run()`). Для одиночних ранів через `bin/cc-run.sh`
+(поза ланцюгом) такого автокоміту не було — контракт «ok (sha)» на
+BACKEND=codex мовчки не виконувався.
+
+**Чому не `--add-dir .git`.** Codex CLI дозволяє розширити sandbox
+конкретною директорією прапорцем `--add-dir` (використовується для run-dir:
+`--add-dir "$D"`, бо `$D` лежить поза CWD-репо, у `$CC_RUNS`). Додати туди й
+`.git` виглядало б найпростішим фіксом — але `--add-dir` дає **повний
+read-write** доступ до директорії, включно з `.git/hooks/`. Агент під
+sandbox workspace-write, отримавши запис у `.git/hooks/pre-commit` (чи
+будь-який інший хук) і подальший `git commit`, зміг би виконати довільний
+код **поза межами sandbox** — сам sandbox це не ловить, бо хук запускається
+зовнішнім `git`, не самим codex. Тому `--add-dir .git` — заборонено
+рішенням Марка, не технічне обмеження codex.
+
+**Обраний варіант (a): коміт робить wrapper, не агент.** `bin/cc-run.sh`,
+гілка `BACKEND=codex`, після спавну `codex exec` і появи `RESULT: ok` у
+`out.log`:
+
+1. Перевіряє `git -C "$PWD" status --porcelain` (той самий `$PWD`, з яким
+   був викликаний `codex exec -C "$PWD"`).
+2. Дерево чисте → нічого не комітить, у `out.log` дописується `COMMIT: none`.
+3. Дерево брудне → `git add -A && git -c core.hooksPath=/dev/null commit
+   -qm "codex(<RUN_ID>): <перший рядок NOTES або RUN_ID>"`. `core.hooksPath=
+   /dev/null` (не `--no-verify`) — той самий принцип, що й заборона
+   `--add-dir .git`: якщо в `.git/hooks/` колись опиниться скрипт (навіть
+   легітимний, не від агента), коміт з батьківського процесу все одно не
+   повинен його виконати без явного рішення людини. У `out.log` — `COMMIT:
+   <short-sha>`, вставлений ПЕРЕД останнім рядком (`RESULT: ...`), який
+   лишається справжнім останнім рядком файлу.
+4. Коміт не пройшов (немає git-ідентичності автора, конфлікт індексу тощо)
+   → RESULT переозначається на `fail`: у кінець `out.log` дописуються
+   `COMMIT: FAILED`, `NOTES: codex commit не пройшов: <git-помилка>` і
+   `RESULT: fail` (справжній останній рядок) — далі спільний
+   RESULT-парсинг нижче в `cc-run.sh` (той самий, що для `claude`) віддає
+   `exit 2` і нотифікацію з причиною, без дублювання логіки.
+
+Для `BACKEND=claude` нічого з цього не виконується — гілка codex ізольована
+`if [ "$BACKEND" = "codex" ]`.
+
+**`cc-chain.sh` змін не потребував.** Ланцюг ніколи не делегує спавн у
+`cc-run.sh` — `do_run()` сам викликає `codex exec`/`claude -p` і сам робить
+`git add -A && git commit` (рядок після спавну, спільний для обох бекендів,
+бо це команди батьківського процесу в `$CWD`, а не всередині sandbox).
+sha для «ok (sha)» і продовження гілки береться однаково для обох
+бекендів — `git rev-parse --short HEAD` одразу після коміту, той самий
+рядок логу `"$id: ok ($(git rev-parse --short HEAD))"`. Перевірено
+`tests/test-chain-codex.sh` (два послідовні codex-рани продовжують гілку
+одне одного, sha з логу == HEAD після кожного кроку).

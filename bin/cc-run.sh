@@ -200,6 +200,50 @@ if [ "$BACKEND" = "codex" ]; then
   if [ -f "$D/events.jsonl" ] && grep -aqiE '"type":"turn\.failed"|rate.?limit|quota|usage_limit' "$D/events.jsonl"; then
     echo "session limit" >> "$D/out.log"
   fi
+
+  # --- Автокоміт для codex (варіант (a), рішення Марка): codex під sandbox
+  # workspace-write НІКОЛИ не пише в .git (--add-dir .git заборонено — дало б
+  # агенту запис у .git/hooks, тобто виконання коду поза sandbox), тож коміт
+  # незакомічених змін після успішного рану робить сама обгортка тут, у
+  # батьківському процесі, ПОЗА sandbox codex. Лише коли RESULT: ok — при
+  # RESULT: fail/session-limit коміту не буде взагалі. Чисте дерево ->
+  # COMMIT: none без коміту. Коміт не пройшов (нема ідентичності автора
+  # тощо) -> перекриваємо RESULT на fail і дописуємо реальну причину в
+  # NOTES, той самий "нема RESULT: ok" шлях нижче дає exit 2.
+  RESULT_LINE_CODEX=$(tail -40 "$D/out.log" | grep -aE "RESULT:[[:space:]]*\**[[:space:]]*(ok|fail)" | tail -1)
+  if printf '%s' "$RESULT_LINE_CODEX" | grep -aqE "RESULT:[[:space:]]*\**[[:space:]]*ok"; then
+    COMMIT_LINE="COMMIT: none"
+    if [ -n "$(git -C "$PWD" status --porcelain 2>/dev/null)" ]; then
+      CNOTES_RAW=$(tail -40 "$D/out.log" | grep -aE "^[[:space:]]*\**[[:space:]]*NOTES:" | tail -1)
+      CNOTES=$(printf '%s' "$CNOTES_RAW" | sed -E 's/^[[:space:]]*\**[[:space:]]*NOTES:[[:space:]]*//' | cut -c1-72)
+      CMSG=${CNOTES:-$ID}
+      GITERR=$(git -C "$PWD" add -A 2>&1 && git -C "$PWD" -c core.hooksPath=/dev/null commit -qm "codex($ID): $CMSG" 2>&1)
+      GITRC=$?
+      if [ "$GITRC" = 0 ]; then
+        COMMIT_LINE="COMMIT: $(git -C "$PWD" rev-parse --short HEAD)"
+      else
+        echo "COMMIT: FAILED" >> "$D/out.log"
+        echo "NOTES: codex commit не пройшов: $(printf '%s' "$GITERR" | tr '\n' ' ' | cut -c1-150)" >> "$D/out.log"
+        echo "RESULT: fail" >> "$D/out.log"
+        COMMIT_LINE=""
+      fi
+    fi
+    # Вставляємо COMMIT-рядок ПЕРЕД останнім непорожнім рядком (контракт:
+    # RESULT лишається останнім рядком out.log). При провалі коміту вище RESULT:
+    # fail вже дописаний як справжній останній рядок — тут нічого вставляти.
+    if [ -n "$COMMIT_LINE" ]; then
+      awk -v cl="$COMMIT_LINE" '
+        { lines[NR]=$0 }
+        END {
+          last=NR
+          while (last>0 && lines[last]=="") last--
+          for (i=1;i<last;i++) print lines[i]
+          print cl
+          for (i=last;i<=NR;i++) print lines[i]
+        }
+      ' "$D/out.log" > "$D/out.log.tmp" && mv "$D/out.log.tmp" "$D/out.log"
+    fi
+  fi
   (exit "$RC")
 elif [ "$STYLE" = "none" ]; then
   # RUN_TIMEOUT_S: жорсткий backstop поверх CEILING_MS вище — той лише робить

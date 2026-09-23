@@ -82,7 +82,7 @@ run_case() {
   echo "task $ID" > "$D/task.md"
   ( cd "$REPO" && \
     CC_RUNS="$RUNS" CC_CODEX_BIN="$STUB" CC_CODEX_STUB_LOG="$STUBLOG" \
-    CC_TEST_SCENARIO="$SCENARIO" CC_NOTIFY=/bin/true \
+    CC_TEST_SCENARIO="$SCENARIO" CC_NOTIFY="$HERE/fixtures/notify-null.sh" \
     CC_OPUS_REASON="$REASON" \
     sh "$BIN/cc-run.sh" "$D" none "$MODEL" codex ) >/dev/null 2>&1
   return $?

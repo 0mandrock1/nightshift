@@ -88,7 +88,7 @@ PLAN_A="$TMP/plan-a.txt"
 : > "$STUBLOG"; echo 0 > "$COUNTER"
 mkdir -p "$TMP/runs-a"
 CC_RUNS="$TMP/runs-a" CC_CODEX_BIN="$STUB" CC_CODEX_STUB_LOG="$STUBLOG" \
-  CC_CODEX_STUB_COUNTER="$COUNTER" CC_TEST_SCENARIO=ok CC_NOTIFY=/bin/true \
+  CC_CODEX_STUB_COUNTER="$COUNTER" CC_TEST_SCENARIO=ok CC_NOTIFY="$HERE/fixtures/notify-null.sh" \
   CC_WEEK_LOCK="$TMP/no-week-lock-a" \
   sh "$BIN/cc-chain.sh" "$REPO_A" "$PLAN_A" chain-codex-a >"$TMP/chain-a.out" 2>&1
 RC=$?
@@ -128,7 +128,7 @@ PLAN_B="$TMP/plan-b.txt"
 : > "$STUBLOG"; echo 0 > "$COUNTER"
 mkdir -p "$TMP/runs-b"
 CC_RUNS="$TMP/runs-b" CC_CODEX_BIN="$STUB" CC_CODEX_STUB_LOG="$STUBLOG" \
-  CC_CODEX_STUB_COUNTER="$COUNTER" CC_TEST_SCENARIO=quota CC_NOTIFY=/bin/true \
+  CC_CODEX_STUB_COUNTER="$COUNTER" CC_TEST_SCENARIO=quota CC_NOTIFY="$HERE/fixtures/notify-null.sh" \
   CC_WEEK_LOCK="$TMP/no-week-lock-b" \
   sh "$BIN/cc-chain.sh" "$REPO_B" "$PLAN_B" chain-codex-b >"$TMP/chain-b.out" 2>&1
 RC=$?

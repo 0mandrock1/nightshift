@@ -23,7 +23,7 @@ FAIL=0
 
 # --- 1. Без БД (нема CC_PG_CREDS) + ESCALATION_OF заданий -> fail-closed ---
 STARTED1="$TMP/started1"; mkdir -p "$STARTED1"
-CC_RUNS_DIR="$TMP/runs1" CC_SWARMS_DIR="$TMP/swarms1" CC_NOTIFY=/bin/true \
+CC_RUNS_DIR="$TMP/runs1" CC_SWARMS_DIR="$TMP/swarms1" CC_NOTIFY="$HERE/fixtures/notify-null.sh" \
   CC_PG_CREDS="$TMP/no-creds" \
   ESCALATION_OF="prev-run-id" \
   DRYRUN=1 sh "$BIN/cc-swarm.sh" "$REPO" "$PLAN" "esc-nodb" >"$TMP/out1.log" 2>&1
@@ -47,7 +47,7 @@ echo "POSTGRES_PASSWORD=fake" > "$TMP/fake-creds.env"
 
 STARTED2="$TMP/started2"; mkdir -p "$STARTED2"
 PATH="$FAKEBIN:$PATH" \
-  CC_RUNS_DIR="$TMP/runs2" CC_SWARMS_DIR="$TMP/swarms2" CC_NOTIFY=/bin/true \
+  CC_RUNS_DIR="$TMP/runs2" CC_SWARMS_DIR="$TMP/swarms2" CC_NOTIFY="$HERE/fixtures/notify-null.sh" \
   CC_PG_CREDS="$TMP/fake-creds.env" \
   ESCALATION_OF="prev-run-id" \
   DRYRUN=1 sh "$BIN/cc-swarm.sh" "$REPO" "$PLAN" "esc-cap" >"$TMP/out2.log" 2>&1
@@ -66,7 +66,7 @@ echo "1"
 EOF
 chmod +x "$FAKEBIN/docker"
 PATH="$FAKEBIN:$PATH" \
-  CC_RUNS_DIR="$TMP/runs3" CC_SWARMS_DIR="$TMP/swarms3" CC_NOTIFY=/bin/true \
+  CC_RUNS_DIR="$TMP/runs3" CC_SWARMS_DIR="$TMP/swarms3" CC_NOTIFY="$HERE/fixtures/notify-null.sh" \
   CC_PG_CREDS="$TMP/fake-creds.env" \
   ESCALATION_OF="prev-run-id" \
   DRYRUN=1 sh "$BIN/cc-swarm.sh" "$REPO" "$PLAN" "esc-ok" >"$TMP/out3.log" 2>&1

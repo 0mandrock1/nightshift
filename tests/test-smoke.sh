@@ -3,6 +3,7 @@
 # лишатись робочими симлінками на bin/* після перенесення продукту.
 # DRYRUN=1 — валідація/worktree/маніфест без реального спавну (claude -p не викликається).
 set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
 OLD_SWARM=/root/ops/cc-runs/cc-swarm.sh
 OLD_LOCAL=/root/ops/cc-runs/cc-lane-local.sh
 
@@ -33,7 +34,7 @@ while [ $i -lt 3 ]; do
   i=$((i+1))
 done
 
-CC_RUNS_DIR="$TMP/runs" CC_SWARMS_DIR="$TMP/swarms" CC_NOTIFY=/bin/true \
+CC_RUNS_DIR="$TMP/runs" CC_SWARMS_DIR="$TMP/swarms" CC_NOTIFY="$HERE/fixtures/notify-null.sh" \
   CC_PG_CREDS="$TMP/no-creds" \
   DRYRUN=1 sh "$OLD_SWARM" "$REPO" "$PLAN" smoke-test
 RC=$?

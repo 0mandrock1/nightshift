@@ -44,7 +44,7 @@ EOF
 START=$(date +%s)
 CC_RUNS_DIR="$TMP/runs" CC_SWARMS_DIR="$TMP/swarms" CC_RUN_SH="$STUB" \
   CC_PG_CREDS="$TMP/no-creds" \
-  CC_NOTIFY=/bin/true MAXPAR=2 LANE_TIMEOUT=3 \
+  CC_NOTIFY="$HERE/fixtures/notify-null.sh" MAXPAR=2 LANE_TIMEOUT=3 \
   sh "$BIN/cc-swarm.sh" "$REPO" "$PLAN" timeout-test
 RC=$?
 ELAPSED=$(( $(date +%s) - START ))
