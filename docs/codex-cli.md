@@ -186,3 +186,29 @@ codex exec -m gpt-6-nope --sandbox read-only --json -o /tmp/codex-probe/last2.tx
 - `last2.txt` не створюється (агент не дійшов до відповіді).
 - JSONL-подій: `thread.started` → `item.completed` (`item.type=error`, `message="Model metadata for \`gpt-6-nope\` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."`) → `turn.started` → `error` (`message` містить вкладений JSON: `status 400`, `type invalid_request_error`, `"The 'gpt-6-nope' model is not supported when using Codex with a ChatGPT account."`) → `turn.failed` (той самий error-об'єкт).
 - Для класифікації помилок: невідома модель = exit 1, з `turn.failed.error.message` — вкладений JSON-рядок з `status:400`/`type:invalid_request_error`, не окремі структуровані поля.
+
+## Live smoke ns-codex-live-20260923-0312
+
+Бойовий прогін cc-run.sh з `BACKEND=codex`, `MODEL=sonnet` (→ мапиться в `gpt-6-luna`) на реальному repo з навмисним багом.
+
+Робоча тека `/tmp/codex-live-ns-codex-live-20260923-0312` (git init, поза `/root/ops/cc-runs`): `add.py` з `return a - b` (баг) + `test_add.py` (assert-скрипт). Run-dir вкладеного рану — `/tmp/codex-live-ns-codex-live-20260923-0312-run` (теж у `/tmp`, не в `/root/ops/cc-runs`).
+
+Команда:
+```
+cd /tmp/codex-live-ns-codex-live-20260923-0312 && CC_TAG=codex-smoke sh /root/projects/nightshift/bin/cc-run.sh /tmp/codex-live-ns-codex-live-20260923-0312-run none sonnet codex
+```
+
+Перший прогін з `task.md`, що вимагав `git commit`, дав `RESULT: fail` (exit script 2, `exit_code`-файл 0 — сам codex exec відпрацював чисто, RC=0): `.git/index.lock` не можна записати, `.git` у sandbox `workspace-write` доступний лише на читання. Прибрано вимогу коміту з task.md, репо скинуто (`git reset --hard`) до багованого стану, run-dir перестворено — другий прогін пройшов.
+
+Перевірено руками (не зі слів вкладеного рану):
+- `sh cc-run.sh` exit code: **0**.
+- `add.py` після рану: `return a + b` (баг виправлено); `python3 test_add.py` запущено самостійно з host-сесії → `all tests passed`, exit 0.
+- Модель: **events.jsonl не містить поля `model`** (лише `thread.started`/`turn.started`/`item.*`/`turn.completed`, як і задокументовано вище для проби 22.09) — підтверджено через `~/.codex/sessions/2026/09/23/rollout-*-<thread_id>.jsonl` (thread_id з `events.jsonl`), там `"model":"gpt-6-luna"`.
+- `telemetry.log`: `[2026-09-23T03:28:19Z] cost: codex-live-ns-codex-live-20260923-0312-run: 83154 токенів (cache_read 90%), n/a codex` — з `turn.completed.usage`: `input_tokens=82793, cached_input_tokens=75520, output_tokens=361, reasoning_output_tokens=0`.
+- `notify-debug.log`: `notify_silent rc=0` (preflight) і `notify rc=0` (afterflight, `codex-smoke · ok`) — обидва `curl_rc=0 http=200`.
+
+Гард дорогої моделі (крок 4): та сама команда з `MODEL=opus`, без `CC_OPUS_REASON` (унсет у сесії):
+```
+CC_TAG=codex-smoke sh /root/projects/nightshift/bin/cc-run.sh /tmp/codex-live-ns-codex-live-20260923-0312-run-opusgate none opus codex
+```
+exit **6**, повідомлення `ВІДМОВА opus-gate: ... просить opus без CC_OPUS_REASON`. Run-dir після відмови містить лише `cwd`/`session_id`/`task.md` — **нема `events.jsonl`/`last-message.txt`**, тобто `codex exec` не спавнився (гард спрацював до виклику бінарника, не після).
