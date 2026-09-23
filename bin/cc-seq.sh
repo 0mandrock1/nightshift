@@ -12,7 +12,8 @@ export CC_RUNS
 PLAN=${1:?plan}; TAG=${2:-seq}
 LOG="$CC_RUNS/$TAG-$(date +%Y%m%d-%H%M).log"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" >> "$LOG"; }
-notify(){ [ -f "$BIN/cc-notify.sh" ] || return 0; sh "$BIN/cc-notify.sh" "$*" >/dev/null 2>&1 || true; }
+NOTIFY=${CC_NOTIFY:-$BIN/cc-notify.sh}
+notify(){ [ -f "$NOTIFY" ] || return 0; sh "$NOTIFY" "$*" >/dev/null 2>&1 || true; }
 PASSED=0
 log "seq старт: $PLAN"
 while IFS='|' read -r d style model; do

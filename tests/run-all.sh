@@ -2,6 +2,7 @@
 # Прогонити всі тести cc-swarm послідовно, звіт у кінці.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
+export CC_NOTIFY=${CC_NOTIFY:-/bin/true}
 FAIL=0
 for t in "$HERE"/test-*.sh; do
   echo "=== $(basename "$t") ==="

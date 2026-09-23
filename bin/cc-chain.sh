@@ -106,8 +106,9 @@ log(){ echo "[$(date -u +%H:%M:%S)] $*" >> "$CHAIN"; }
 # Best-effort Telegram-нотифікація; ніколи не валить ланцюг і не чіпає exit-коди.
 # notify — afterflight (ok/fail/session/ланцюг), зі звуком, однорядковий телеграф.
 # notify_silent — preflight (старт, <pre>-таблиця), без звуку (disable_notification).
-notify(){ sh "$BIN/cc-notify.sh" "$*" >/dev/null 2>&1 || true; }
-notify_silent(){ sh "$BIN/cc-notify.sh" "$1" silent >/dev/null 2>&1 || true; }
+NOTIFY=${CC_NOTIFY:-$BIN/cc-notify.sh}
+notify(){ [ -f "$NOTIFY" ] || return 0; sh "$NOTIFY" "$*" >/dev/null 2>&1 || true; }
+notify_silent(){ [ -f "$NOTIFY" ] || return 0; sh "$NOTIFY" "$1" silent >/dev/null 2>&1 || true; }
 PASSED=0
 
 # --- Протокол аромату (рішення 24.08) ---
