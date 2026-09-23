@@ -5,24 +5,36 @@
 #
 #   sh cc-chain.sh <cwd> <plan-file> [tag]
 #
-# Формат plan-файлу, по рядку на ран:   slug|style|/abs/path/task.md
+# Формат plan-файлу, по рядку на ран:   slug|style|/abs/path/task.md|model|backend
 #   style: ponytail | caveman | none | (порожньо/auto/будь-що інше =
 #          авто-призначення π-цифрою за наскрізним індексом — рішення 24.08,
 #          model-router-runfile/output-style-tracking; призначає вузол, не чат)
+#   model: sonnet|opus|haiku (claude) або gpt-6-luna|gpt-6-sol|gpt-6-astra (codex);
+#          порожньо -> sonnet для claude, gpt-6-luna для codex
+#   backend (5-те поле, опційно): claude|codex — перекриває CC_BACKEND для
+#          цього конкретного рядка плану; порожньо -> CC_BACKEND -> claude
 # У task.md плейсхолдер {RUN_ID} підставляється реальним id рану.
 #
 # ENV: CC_RUNS  (дефолт $(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs) — тека СТАНУ (run-dirs, локи,
 #               .style-index, .pi-digits, лог-файли ланцюга); експортується
 #               для дочірніх процесів (cc-run.sh тощо)
+#      CC_BACKEND  (дефолт claude) — claude|codex, бекенд для рядків плану без
+#               власного 5-го поля; codex-гілка спавнить `codex exec`
+#               (мапінг моделі/сесія-лімет/RESULT-парсинг — той самий підхід,
+#               що й у cc-run.sh, без делегування туди — ланцюг сам робить
+#               git checkout/auto-commit навколо спавну)
+#      CC_CODEX_BIN  (дефолт codex) — бінарник Codex CLI
+#      CC_CODEX_SANDBOX  (дефолт workspace-write) — codex -s
 #      CC_EXTRA_PATH  (дефолт порожньо) — префікс до PATH ПЕРЕД спавном claude
 #               (на вузлах, де claude стоїть поза PATH неінтерактивного sh)
 #
-# Коди виходу: 0 пройшло все | 2 ран впав | 3 session limit ("прийди пізніше") | 4 конфлікт ізоляції (CWD чи plan вже зайнятий іншим ланцюгом) / ambiguous (RESULT відсутній при чистому exit) | 5 гейт тижневого бюджету / тижневий лок | 6 гард дорогої моделі
+# Коди виходу: 0 пройшло все | 2 ран впав | 3 session limit ("прийди пізніше", claude чи codex-квота) | 4 конфлікт ізоляції (CWD чи plan вже зайнятий іншим ланцюгом) / ambiguous (RESULT відсутній при чистому exit) | 5 гейт тижневого бюджету / тижневий лок | 6 гард дорогої моделі
 set -u
 
 [ -n "${CC_EXTRA_PATH:-}" ] && PATH="$CC_EXTRA_PATH:$PATH"
 export PATH
 CC_CLAUDE_BIN=${CC_CLAUDE_BIN:-claude}
+CC_BACKEND=${CC_BACKEND:-claude}
 
 BIN=$(dirname "$(readlink -f "$0")")
 # NODE: дефолт $(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs — резолвиться в /root/ops/cc-runs на VPS
@@ -169,16 +181,42 @@ fail_reason(){
 }
 
 do_run(){
-  slug=$1; style=$2; task=$3; model=${4:-}
-  # 11.09: порожнє поле мало давати sonnet-дефолт (cc-preferences 27.08), а
-  # мовчки йшло в CLI-дефолт (opus), обходячи opus-gate. R1 thumbfeed заплатив
-  # $26.91 переплати через це. Fail-closed: порожньо -> sonnet.
-  [ -n "$model" ] || model=sonnet
-  MODELARG=""; [ -n "$model" ] && MODELARG="--model $model"
+  slug=$1; style=$2; task=$3; model=${4:-}; backend_raw=${5:-}
+  backend=$backend_raw; [ -n "$backend" ] || backend=$CC_BACKEND
+  case "$backend" in
+    claude|codex) : ;;
+    *) log "$slug: невідомий backend '$backend' (очікую claude|codex) — ланцюг спинено"; exit 1 ;;
+  esac
+  if [ "$backend" = codex ]; then
+    # Мапінг claude-стилю моделі -> codex slug (той самий, що cc-run.sh), щоб
+    # plan-рядки з opus/sonnet/haiku відпрацьовували без правок на codex.
+    case "$model" in
+      "")     CODEXMODEL=gpt-6-luna ;;
+      opus)   CODEXMODEL=gpt-6-sol ;;
+      sonnet) CODEXMODEL=gpt-6-luna ;;
+      haiku)  CODEXMODEL=gpt-6-luna ;;
+      gpt-*)  CODEXMODEL=$model ;;
+      *)
+        log "$slug: невідома модель для codex-бекенда: '$model' (очікую opus|sonnet|haiku|порожньо|gpt-*) — ланцюг спинено"
+        exit 2
+        ;;
+    esac
+    case "$CODEXMODEL" in
+      gpt-6-sol|gpt-6-astra) GATEMODEL=opus ;;
+      *) GATEMODEL=$model ;;
+    esac
+  else
+    # 11.09: порожнє поле мало давати sonnet-дефолт (cc-preferences 27.08), а
+    # мовчки йшло в CLI-дефолт (opus), обходячи opus-gate. R1 thumbfeed заплатив
+    # $26.91 переплати через це. Fail-closed: порожньо -> sonnet.
+    [ -n "$model" ] || model=sonnet
+    MODELARG=""; [ -n "$model" ] && MODELARG="--model $model"
+    GATEMODEL=$model
+  fi
   # Гард дорогої моделі — на КОЖЕН крок ланцюга окремо: план може змішувати
   # sonnet і opus по рядках, тож перевірка мусить бути тут, а не на старті.
   if [ -f "$BIN/cc-opus-gate.sh" ]; then
-    sh "$BIN/cc-opus-gate.sh" "$model" "$slug" || { log "$slug: opus-gate ВІДМОВА — ланцюг спинено"; exit 6; }
+    sh "$BIN/cc-opus-gate.sh" "$GATEMODEL" "$slug" || { log "$slug: opus-gate ВІДМОВА — ланцюг спинено"; exit 6; }
   fi
   id="$slug-$STAMP"; d="$RUNS/$id"; mkdir -p "$d"
   cd "$CWD" || exit 1
@@ -193,7 +231,7 @@ do_run(){
 ---
 КОНТРАКТ ВИВОДУ (обов'язково, незалежно від стилю відповіді вище): останній рядок усієї відповіді — рівно "RESULT: ok" або "RESULT: fail", без зірочок, без тексту після нього. Людський підсумок вище — ОК, але цей рядок йде строго останнім.
 RESULTCONTRACT
-  log "$id старт (style=$style, base=$(cut -c1-7 < $d/base_sha))"
+  log "$id старт (backend=$backend, style=$style, base=$(cut -c1-7 < $d/base_sha))"
   # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0: без цього headless-сесія може
   # вийти по стелі очікування фонової задачі (Task/background bash),
   # обірвавши сесію ДО друку RESULT: — ран падає з реальною роботою
@@ -209,12 +247,32 @@ RESULTCONTRACT
   # limit" у out.log і так само падає в гілку auto-commit -> FAIL нижче,
   # просто за фіксований час, а не за весь залишок вікна.
   RUN_TIMEOUT_S=${CC_RUN_TIMEOUT_S:-2700}
-  if [ "$style" = "none" ]; then
+  if [ "$backend" = codex ]; then
+    # Codex CLI: немає --settings/outputStyle/--allowedTools, аромат уже
+    # впаяний у task.md. RESULT-контракт codex пише у -o файл
+    # (last-message.txt), не в stdout — дописуємо в кінець out.log, щоб
+    # RESULT/NOTES-парсинг нижче (спільний з claude-гілкою) працював без змін.
+    CC_CODEX_BIN=${CC_CODEX_BIN:-codex}
+    CC_CODEX_SANDBOX=${CC_CODEX_SANDBOX:-workspace-write}
+    timeout "$RUN_TIMEOUT_S" "$CC_CODEX_BIN" exec -m "$CODEXMODEL" \
+      -s "$CC_CODEX_SANDBOX" --skip-git-repo-check --add-dir "$d" \
+      -c model_auto_compact_token_limit=270000 \
+      -C "$CWD" --json -o "$d/last-message.txt" "$(cat "$d/task.md")" \
+      < /dev/null > "$d/events.jsonl" 2> "$d/out.log"
+    CLAUDE_EXIT=$?
+    [ -f "$d/last-message.txt" ] && cat "$d/last-message.txt" >> "$d/out.log"
+    # turn.failed / квота / rate-limit в events.jsonl -> той самий шлях
+    # "session limit" нижче, що вже ловить claude-гілку (exit 3).
+    if [ -f "$d/events.jsonl" ] && grep -aqiE '"type":"turn\.failed"|rate.?limit|quota|usage_limit' "$d/events.jsonl"; then
+      echo "session limit" >> "$d/out.log"
+    fi
+  elif [ "$style" = "none" ]; then
     timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat $d/task.md)" $MODELARG --permission-mode acceptEdits --allowedTools "$TOOLS" < /dev/null > "$d/out.log" 2>&1
+    CLAUDE_EXIT=$?
   else
     timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat $d/task.md)" $MODELARG --permission-mode acceptEdits --allowedTools "$TOOLS" --settings "{\"outputStyle\":\"$style\"}" < /dev/null > "$d/out.log" 2>&1
+    CLAUDE_EXIT=$?
   fi
-  CLAUDE_EXIT=$?
   [ "$CLAUDE_EXIT" = 124 ] && log "$id: TIMEOUT — вбито по ${RUN_TIMEOUT_S}s, перевіряю чи є реальна робота нижче"
   log "$(sh "$BIN/run-usage.sh" "$d" 2>&1 | tail -1)"
   [ -f "$BIN/cc-cost.sh" ] && log "$(sh "$BIN/cc-cost.sh" "$d" 2>/dev/null | tail -1)"
@@ -349,12 +407,12 @@ if [ "${WEEK_MIN_LEFT}" != 0 ] && command -v node >/dev/null 2>&1 && command -v 
       ;;
   esac
 fi
-while IFS='|' read -r slug style_raw task model; do
+while IFS='|' read -r slug style_raw task model backend_raw; do
   [ -n "${slug:-}" ] || continue
   case "$slug" in \#*) continue ;; esac
   style=$(resolve_style "$style_raw")
   [ "$style" = "$style_raw" ] || log "$slug: аромат авто-призначено π-цифрою -> $style"
-  do_run "$slug" "$style" "$task" "${model:-}"
+  do_run "$slug" "$style" "$task" "${model:-}" "${backend_raw:-}"
 done < "$PLAN"
 log "ланцюг пройшов повністю, гілка $(git -C "$CWD" rev-parse --abbrev-ref HEAD)"
 notify "✅ $TAG · ланцюг пройшов · $PASSED ранів ok · гілка $(git -C "$CWD" rev-parse --abbrev-ref HEAD) · exit 0"
