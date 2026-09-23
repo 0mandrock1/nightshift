@@ -23,7 +23,7 @@ echo "RESULT: ok"
 EOF
 chmod +x "$STUB_OK"
 
-CC_RUNS="$TMP/runs" CC_CLAUDE_BIN="$STUB_OK" CC_NOTIFY=/bin/true \
+CC_RUNS="$TMP/runs" CC_CLAUDE_BIN="$STUB_OK" CC_NOTIFY="$HERE/fixtures/notify-null.sh" \
   sh "$BIN/cc-run.sh" "$D_OK" none haiku
 RC=$?
 [ "$RC" = 0 ] || { echo "FAIL(a): очікував exit 0, отримав $RC"; FAIL=1; }
@@ -34,7 +34,7 @@ grep -q '^## Sync-only' "$D_OK/task.md" && [ "$(grep -c '^## Sync-only' "$D_OK/t
 D_HAS="$TMP/runs/has-sync"
 mkdir -p "$D_HAS"
 printf 'Нічого не роби.\n\n## Sync-only\nвже тут\n' > "$D_HAS/task.md"
-CC_RUNS="$TMP/runs" CC_CLAUDE_BIN="$STUB_OK" CC_NOTIFY=/bin/true \
+CC_RUNS="$TMP/runs" CC_CLAUDE_BIN="$STUB_OK" CC_NOTIFY="$HERE/fixtures/notify-null.sh" \
   sh "$BIN/cc-run.sh" "$D_HAS" none haiku >/dev/null 2>&1
 N=$(grep -c '^## Sync-only' "$D_HAS/task.md")
 [ "$N" = "1" ] || { echo "FAIL(a2): очікував 1 наявну секцію Sync-only без дублювання, є $N"; FAIL=1; }
@@ -52,7 +52,7 @@ exit 1
 EOF
 chmod +x "$STUB_BG"
 
-CC_RUNS="$TMP/runs" CC_CLAUDE_BIN="$STUB_BG" CC_NOTIFY=/bin/true \
+CC_RUNS="$TMP/runs" CC_CLAUDE_BIN="$STUB_BG" CC_NOTIFY="$HERE/fixtures/notify-null.sh" \
   sh "$BIN/cc-run.sh" "$D_BG" none haiku >/dev/null 2>&1
 RC=$?
 [ "$RC" = 2 ] || { echo "FAIL(b): очікував exit 2, отримав $RC"; FAIL=1; }
@@ -75,7 +75,7 @@ exit 1
 EOF
 chmod +x "$STUB_NR"
 
-CC_RUNS="$TMP/runs" CC_CLAUDE_BIN="$STUB_NR" CC_NOTIFY=/bin/true \
+CC_RUNS="$TMP/runs" CC_CLAUDE_BIN="$STUB_NR" CC_NOTIFY="$HERE/fixtures/notify-null.sh" \
   sh "$BIN/cc-run.sh" "$D_NR" none haiku >/dev/null 2>&1
 if [ -f "$D_NR/fail_reason" ]; then
   R=$(cat "$D_NR/fail_reason")

@@ -16,7 +16,8 @@ LOCK="$CC_RUNS/.week-locked"
 THRESH=${CC_WEEK_MIN_LEFT:-5}
 DRYRUN=${DRYRUN:-0}
 USAGE_CLI=${CC_USAGE_CLI:-/root/projects/tg_bots/mandrock0_cc_bot/usage-cli.js}
-notify(){ [ "$DRYRUN" = 1 ] && { echo "[dry] notify: $*"; return; }; sh "$BIN/cc-notify.sh" "$*" >/dev/null 2>&1 || true; }
+NOTIFY=${CC_NOTIFY:-$BIN/cc-notify.sh}
+notify(){ [ "$DRYRUN" = 1 ] && { echo "[dry] notify: $*"; return; }; [ -f "$NOTIFY" ] || return 0; sh "$NOTIFY" "$*" >/dev/null 2>&1 || true; }
 
 U7=$(cd "$(dirname "$USAGE_CLI")" 2>/dev/null; node "$USAGE_CLI" --ratelimit-json 2>/dev/null | jq -r '.util7d // empty' 2>/dev/null)
 case "$U7" in ''|*[!0-9.]*) exit 0 ;; esac

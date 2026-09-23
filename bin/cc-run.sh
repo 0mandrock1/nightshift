@@ -144,15 +144,107 @@ $PF_HTML"
 fi
 
 if [ "$BACKEND" = "codex" ]; then
-  # Codex CLI: немає --settings/outputStyle, аромат уже впаяний у task.md
-  # (STYLE:-рядок або нативний settings.json, той самий task.md для обох
-  # бекендів). Немає --allowedTools — sandbox workspace-write є еквівалентом
-  # acceptEdits (правки лишаються в CWD, без мережі/поза-репо без явного дозволу).
-  # --skip-git-repo-check — безкоштовно, коли CWD і так git-репо; рятує коли ні.
-  CODEXMODEL=""; [ -n "$MODEL" ] && CODEXMODEL="-m $MODEL"
-  codex exec $CODEXMODEL -s workspace-write --skip-git-repo-check \
-    -C "$PWD" -o "$D/last-message.txt" "$(cat "$D/task.md")" \
-    < /dev/null > "$D/out.log" 2>&1
+  # Codex CLI: немає --settings/outputStyle/--allowedTools, аромат уже
+  # впаяний у task.md (той самий task.md, що й для claude). sandbox
+  # workspace-write — еквівалент acceptEdits; danger-full-access лише коли
+  # явно виставлений CC_CODEX_SANDBOX. --skip-git-repo-check — безкоштовно,
+  # коли CWD і так git-репо; рятує коли ні. --add-dir "$D" — run-dir лежить
+  # поза CWD-репо (в $CC_RUNS): без цього codex не міг би писати туди
+  # last-message.txt (docs/codex-cli.md підтверджує --add-dir у 0.156.1).
+  CC_CODEX_BIN=${CC_CODEX_BIN:-codex}
+  CC_CODEX_SANDBOX=${CC_CODEX_SANDBOX:-workspace-write}
+  RUN_TIMEOUT_S=${CC_RUN_TIMEOUT_S:-2700}
+
+  # --- Мапінг claude-стилю моделі -> codex slug, щоб plan-файли з
+  # claude-моделями (opus/sonnet/haiku) відпрацьовували без правок при
+  # фейловері claude -> codex. Будь-що з префіксом gpt- проходить як є. ---
+  case "$MODEL" in
+    "")     CODEXMODEL=gpt-6-luna ;;
+    opus)   CODEXMODEL=gpt-6-sol ;;
+    sonnet) CODEXMODEL=gpt-6-luna ;;
+    haiku)  CODEXMODEL=gpt-6-luna ;;
+    gpt-*)  CODEXMODEL=$MODEL ;;
+    *)
+      echo "cc-run: невідома модель для codex-бекенда: '$MODEL' (очікую opus|sonnet|haiku|порожньо|gpt-*)" >&2
+      echo 2 > "$D/exit_code"
+      notify "❌ $TAG · fail · <code>$ID</code> · exit 2 · невідома модель codex: $MODEL"
+      exit 2
+      ;;
+  esac
+
+  # --- Гард дорогої моделі: gpt-6-sol/gpt-6-astra ~ opus. cc-opus-gate.sh сам
+  # ловить лише підрядок "opus" у MODEL — мапимо явно, щоб gpt-6-sol/astra
+  # без CC_OPUS_REASON так само впирались у відмову (exit 6). ---
+  case "$CODEXMODEL" in
+    gpt-6-sol|gpt-6-astra) GATEMODEL=opus ;;
+    *) GATEMODEL=$MODEL ;;
+  esac
+  if [ -f "$BIN/cc-opus-gate.sh" ]; then
+    sh "$BIN/cc-opus-gate.sh" "$GATEMODEL" "$ID" || exit $?
+  fi
+
+  timeout "$RUN_TIMEOUT_S" "$CC_CODEX_BIN" exec -m "$CODEXMODEL" \
+    -s "$CC_CODEX_SANDBOX" --skip-git-repo-check --add-dir "$D" \
+    -c model_auto_compact_token_limit=270000 \
+    -C "$PWD" --json -o "$D/last-message.txt" "$(cat "$D/task.md")" \
+    < /dev/null > "$D/events.jsonl" 2> "$D/out.log"
+  RC=$?
+
+  # RESULT-контракт codex пише у -o файл (last-message.txt), не в stdout —
+  # дописуємо в кінець out.log, щоб RESULT/NOTES-парсинг і нотифікація нижче
+  # працювали для обох бекендів без змін.
+  [ -f "$D/last-message.txt" ] && cat "$D/last-message.txt" >> "$D/out.log"
+
+  # turn.failed / квота / rate-limit в events.jsonl -> той самий шлях "session
+  # limit", що вже нижче ловить claude-гілку (exit 3, та сама нотифікація).
+  if [ -f "$D/events.jsonl" ] && grep -aqiE '"type":"turn\.failed"|rate.?limit|quota|usage_limit' "$D/events.jsonl"; then
+    echo "session limit" >> "$D/out.log"
+  fi
+
+  # --- Автокоміт для codex (варіант (a), рішення Марка): codex під sandbox
+  # workspace-write НІКОЛИ не пише в .git (--add-dir .git заборонено — дало б
+  # агенту запис у .git/hooks, тобто виконання коду поза sandbox), тож коміт
+  # незакомічених змін після успішного рану робить сама обгортка тут, у
+  # батьківському процесі, ПОЗА sandbox codex. Лише коли RESULT: ok — при
+  # RESULT: fail/session-limit коміту не буде взагалі. Чисте дерево ->
+  # COMMIT: none без коміту. Коміт не пройшов (нема ідентичності автора
+  # тощо) -> перекриваємо RESULT на fail і дописуємо реальну причину в
+  # NOTES, той самий "нема RESULT: ok" шлях нижче дає exit 2.
+  RESULT_LINE_CODEX=$(tail -40 "$D/out.log" | grep -aE "RESULT:[[:space:]]*\**[[:space:]]*(ok|fail)" | tail -1)
+  if printf '%s' "$RESULT_LINE_CODEX" | grep -aqE "RESULT:[[:space:]]*\**[[:space:]]*ok"; then
+    COMMIT_LINE="COMMIT: none"
+    if [ -n "$(git -C "$PWD" status --porcelain 2>/dev/null)" ]; then
+      CNOTES_RAW=$(tail -40 "$D/out.log" | grep -aE "^[[:space:]]*\**[[:space:]]*NOTES:" | tail -1)
+      CNOTES=$(printf '%s' "$CNOTES_RAW" | sed -E 's/^[[:space:]]*\**[[:space:]]*NOTES:[[:space:]]*//' | cut -c1-72)
+      CMSG=${CNOTES:-$ID}
+      GITERR=$(git -C "$PWD" add -A 2>&1 && git -C "$PWD" -c core.hooksPath=/dev/null commit -qm "codex($ID): $CMSG" 2>&1)
+      GITRC=$?
+      if [ "$GITRC" = 0 ]; then
+        COMMIT_LINE="COMMIT: $(git -C "$PWD" rev-parse --short HEAD)"
+      else
+        echo "COMMIT: FAILED" >> "$D/out.log"
+        echo "NOTES: codex commit не пройшов: $(printf '%s' "$GITERR" | tr '\n' ' ' | cut -c1-150)" >> "$D/out.log"
+        echo "RESULT: fail" >> "$D/out.log"
+        COMMIT_LINE=""
+      fi
+    fi
+    # Вставляємо COMMIT-рядок ПЕРЕД останнім непорожнім рядком (контракт:
+    # RESULT лишається останнім рядком out.log). При провалі коміту вище RESULT:
+    # fail вже дописаний як справжній останній рядок — тут нічого вставляти.
+    if [ -n "$COMMIT_LINE" ]; then
+      awk -v cl="$COMMIT_LINE" '
+        { lines[NR]=$0 }
+        END {
+          last=NR
+          while (last>0 && lines[last]=="") last--
+          for (i=1;i<last;i++) print lines[i]
+          print cl
+          for (i=last;i<=NR;i++) print lines[i]
+        }
+      ' "$D/out.log" > "$D/out.log.tmp" && mv "$D/out.log.tmp" "$D/out.log"
+    fi
+  fi
+  (exit "$RC")
 elif [ "$STYLE" = "none" ]; then
   # RUN_TIMEOUT_S: жорсткий backstop поверх CEILING_MS вище — той лише робить
   # очікування видимим (один рядок у out.log), але сам по собі не обмежує
@@ -173,6 +265,28 @@ echo "$RC" > "$D/exit_code"
 
 # Вартість рану + sonnet-еквівалент — у cost.log і telemetry.log (best-effort).
 [ -f "$BIN/cc-cost.sh" ] && sh "$BIN/cc-cost.sh" "$D" >/dev/null 2>&1
+
+# Codex: немає usage.json (claude-специфічний run-usage.sh) — рахуємо токени
+# напряму з turn.completed.usage у events.jsonl. Той самий рядковий формат і
+# той самий telemetry.log, що cc-cost.sh пише для claude; вартість "n/a codex",
+# бо прайсинг codex не портований.
+if [ "$BACKEND" = "codex" ] && [ -f "$D/events.jsonl" ] && command -v jq >/dev/null 2>&1; then
+  CODEX_USAGE=$(jq -rs '
+    [ .[] | select(.type=="turn.completed") | .usage // empty ] as $u
+    | if ($u|length)==0 then empty else
+        ($u | map(.input_tokens // 0) | add) as $in
+      | ($u | map(.cached_input_tokens // 0) | add) as $cr
+      | ($u | map(.output_tokens // 0) | add) as $out
+      | ($in + $out) as $tot
+      | "\($tot) токенів (cache_read \(if $tot>0 then (($cr*100/$tot)|floor) else 0 end)%), n/a codex"
+    end
+  ' "$D/events.jsonl" 2>/dev/null)
+  if [ -n "$CODEX_USAGE" ]; then
+    CODEX_LOG_LINE="$ID: $CODEX_USAGE"
+    echo "$CODEX_LOG_LINE" | tee -a "$D/cost.log"
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] cost: $CODEX_LOG_LINE" >> "${CC_TELEMETRY_LOG:-$CC_RUNS/telemetry.log}"
+  fi
+fi
 
 # Телеметрія в swarm.runs (Postgres) — best-effort, ніколи не чіпає код виходу.
 # CC_TELEMETRY_KIND/CC_PARENT_RUN_ID виставляє викликач (cc-swarm.sh для лейнів/fan-in);

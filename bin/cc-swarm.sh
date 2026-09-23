@@ -7,12 +7,19 @@
 #   sh cc-swarm.sh <repo> <swarm-plan> <swarm-id>
 #
 # Формат plan-файлу (| -розділений, по рядку на лейн):
-#   lane-slug|task.md|verify-cmd|model|style
-#     model  дефолт haiku; local:<tag> -> лейн іде в cc-lane-local.sh
+#   lane-slug|task.md|verify-cmd|model|style|backend
+#     model  дефолт haiku (claude) / gpt-6-luna (codex); local:<tag> -> лейн
+#            іде в cc-lane-local.sh (тільки claude-шлях, backend не читається)
 #     style  дефолт none
+#     backend (6-те поле, опційно): claude|codex — перекриває CC_BACKEND для
+#            цього лейна; порожньо -> CC_BACKEND -> claude. Прокидається як
+#            4-й аргумент у cc-run.sh (той самий біжучий раннер, що й для
+#            одиночних ранів) — увесь codex-мапінг моделі/сесія-ліміту/
+#            RESULT-парсингу вже реалізовано там, тут лише передається.
 #     verify-cmd ОБОВ'ЯЗКОВИЙ — виконується В worktree лейна, exit 0 = ok
 # Fan-in (опційно): якщо існує <swarm-plan>.fanin — це task.md для зведення,
-#   виконується після лейнів на гілці cc/<swarm-id>/fanin, model=sonnet.
+#   виконується після лейнів на гілці cc/<swarm-id>/fanin, model=sonnet,
+#   backend=CC_BACKEND (немає власного поля — фан-ін один на весь рій).
 #
 # ENV: MAXPAR (дефолт 4) — стеля паралельних лейнів, застосовується реально
 #        (pid-список у файлі + kill -0 полінг, POSIX-сумісно, без `wait -n`)
@@ -20,6 +27,9 @@
 #        лейн, що вийшов по таймауту, отримує статус `timeout` у маніфесті і
 #        НЕ блокує решту рою
 #      DRYRUN=1 — уся валідація/worktree/маніфест виконуються, лейни НЕ спавняться
+#      CC_BACKEND (дефолт claude) — claude|codex для лейнів без власного 6-го
+#        поля плану; codex-лейни за замовчуванням ідуть на gpt-6-luna
+#        (мапінг дефолтної моделі — в самому cc-run.sh)
 #      CC_TOOLS, CC_NOTIFY (успадковується cc-run.sh; тут дефолт cc-notify-swarm.sh)
 #      CC_RUNS (дефолт $(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs) — тека СТАНУ (run-dirs, локи, логи);
 #        CC_RUNS_DIR лишено як алiас для зворотної сумісності й ЯВНО перевизначає
@@ -28,7 +38,7 @@
 #      CC_RUN_SH (дефолт <bin>/cc-run.sh) — біжучий раннер (перевизначається в тестах)
 #      CC_LANE_LOCAL_SH (дефолт <bin>/cc-lane-local.sh) — раннер local:* лейнів
 #
-# Коди виходу: 0 усі ok (+fan-in ok) | 1 невалідний план | 2 є фейли | 3 session limit | 5 тижневий лок
+# Коди виходу: 0 усі ok (+fan-in ok) | 1 невалідний план | 2 є фейли | 3 session limit (claude чи codex-квота) | 5 тижневий лок
 set -u
 BIN=$(dirname "$(readlink -f "$0")")
 # NODE: CC_RUNS_DIR — старіша назва змінної цього скрипта, лишена як алiас;
@@ -57,6 +67,7 @@ export CC_NOTIFY=${CC_NOTIFY:-$BIN/cc-notify-swarm.sh}
 export CC_TAG=${CC_TAG:-swarm}
 CC_RUN_SH=${CC_RUN_SH:-$BIN/cc-run.sh}
 CC_LANE_LOCAL_SH=${CC_LANE_LOCAL_SH:-$BIN/cc-lane-local.sh}
+CC_BACKEND=${CC_BACKEND:-claude}
 
 REPO_ABS=$(cd "$REPO" 2>/dev/null && pwd) || { echo "repo не існує: $REPO" >&2; exit 1; }
 PLAN_ABS=$(readlink -f "$PLAN" 2>/dev/null) || { echo "план не існує: $PLAN" >&2; exit 1; }
@@ -158,7 +169,7 @@ trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 
 SLUGS=""
 LANE_N=0
-while IFS='|' read -r slug task verify model style; do
+while IFS='|' read -r slug task verify model style backend_raw; do
   [ -n "${slug:-}" ] || continue
   case "$slug" in \#*) continue ;; esac
   LANE_N=$((LANE_N+1))
@@ -166,6 +177,11 @@ while IFS='|' read -r slug task verify model style; do
   SLUGS="$SLUGS $slug"
   [ -f "$task" ] || die "лейн $slug: нема task-файлу $task"
   [ -n "${verify:-}" ] || die "лейн $slug: verify-cmd порожній (заборонено)"
+  BACKEND_CHECK=${backend_raw:-$CC_BACKEND}
+  case "$BACKEND_CHECK" in
+    claude|codex) : ;;
+    *) die "лейн $slug: невідомий backend '$BACKEND_CHECK' (очікую claude|codex)" ;;
+  esac
   VTRIM=$(printf '%s' "$verify" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
   case "$VTRIM" in
     true|:|"exit 0"|"echo ok") die "лейн $slug: verify-cmd '$VTRIM' — точний збіг з фіктивною командою (денилист §8 SKILL.md), не машинний гейт" ;;
@@ -245,7 +261,8 @@ pi_digit(){
 
 # --- 2/3/4. Спавн лейнів у worktree, зі стелею паралельності ---
 run_lane(){
-  slug=$1; task=$2; verify=$3; model=${4:-haiku}; style=${5:-none}; idx=${6:-0}
+  slug=$1; task=$2; verify=$3; model=${4:-haiku}; style=${5:-none}; idx=${6:-0}; backend=${7:-}
+  [ -n "$backend" ] || backend=$CC_BACKEND
   PART="$SWARM_DIR/parts/$slug.tsv"
   WT="$SWARM_DIR/$slug"
   BRANCH="cc/$SWARM_ID/$slug"
@@ -280,7 +297,7 @@ run_lane(){
     *)
       cd "$WT" || { printf '%s\t-\t-\tfail\tcd worktree впав\n' "$slug" > "$PART"; return 2; }
       CC_TELEMETRY_KIND=lane CC_PARENT_RUN_ID="$SWARM_ID" \
-        timeout "${LANE_TIMEOUT}s" sh "$CC_RUN_SH" "$d" "$style" "$model" > "$d/lane.log" 2>&1
+        timeout "${LANE_TIMEOUT}s" sh "$CC_RUN_SH" "$d" "$style" "$model" "$backend" > "$d/lane.log" 2>&1
       RC=$?
       ;;
   esac
@@ -337,13 +354,13 @@ wait_for_slot(){
 }
 
 LANE_IDX=0
-while IFS='|' read -r slug task verify model style; do
+while IFS='|' read -r slug task verify model style backend_raw; do
   [ -n "${slug:-}" ] || continue
   case "$slug" in \#*) continue ;; esac
 
   wait_for_slot
 
-  run_lane "$slug" "$task" "$verify" "${model:-haiku}" "${style:-none}" "$LANE_IDX" &
+  run_lane "$slug" "$task" "$verify" "${model:-haiku}" "${style:-none}" "$LANE_IDX" "${backend_raw:-$CC_BACKEND}" &
   echo "$!" >> "$PIDS_FILE"
   RUNNING=$((RUNNING+1))
   LANE_IDX=$((LANE_IDX+1))
@@ -379,7 +396,7 @@ if [ -f "$FANIN_FILE" ] && [ "$DRYRUN" != "1" ]; then
   FANIN_WT="$SWARM_DIR/fanin"
   git -C "$REPO_ABS" worktree add "$FANIN_WT" -b "$FANIN_BRANCH" "$BASE_SHA" > "$SWARM_DIR/fanin-worktree.log" 2>&1
   MERGE_FAILS=""
-  while IFS='|' read -r slug task verify model style; do
+  while IFS='|' read -r slug task verify model style backend_raw; do
     [ -n "${slug:-}" ] || continue
     case "$slug" in \#*) continue ;; esac
     STATUS=$(awk -F'\t' -v s="$slug" '$1==s{print $4}' "$MANIFEST")
@@ -409,7 +426,7 @@ if [ -f "$FANIN_FILE" ] && [ "$DRYRUN" != "1" ]; then
   mkdir -p "$FANIN_D"
   cp "$FANIN_FILE" "$FANIN_D/task.md"
   ( cd "$FANIN_WT" && CC_TELEMETRY_KIND=fanin CC_PARENT_RUN_ID="$SWARM_ID" \
-    timeout "${LANE_TIMEOUT}s" sh "$CC_RUN_SH" "$FANIN_D" none sonnet ) > "$FANIN_D/lane.log" 2>&1
+    timeout "${LANE_TIMEOUT}s" sh "$CC_RUN_SH" "$FANIN_D" none sonnet "$CC_BACKEND" ) > "$FANIN_D/lane.log" 2>&1
   FANIN_RC=$?
 fi
 
