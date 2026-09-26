@@ -1,5 +1,7 @@
 # nightshift
 
+![nightshift](assets/cover.png)
+
 Headless driver layer for running Claude Code (and, as a second backend, Codex
 CLI) unattended — single runs, dependent chains, and independent parallel
 swarms — with the guardrails that make that safe to leave running overnight:
