@@ -141,11 +141,11 @@ fail_reason(){
 # Пре-фліт оцінка перед спавном — у лог і в стартову нотифікацію (best-effort).
 ESTIMATE_SH="$BIN/cc-estimate.sh"
 if [ -f "$ESTIMATE_SH" ] && [ -n "$MODEL" ]; then
-  PREFLIGHT=$(sh "$ESTIMATE_SH" --task "$D/task.md" --model "$MODEL" --run-id "$ID" 2>/dev/null)
+  PREFLIGHT=$(sh "$ESTIMATE_SH" --task "$D/task.md" --model "$MODEL" --run-id "$ID" --kind "$TASK_KIND" 2>/dev/null)
   if [ -n "$PREFLIGHT" ]; then
     echo "$PREFLIGHT" > "$D/preflight.log"
     # Telegram отримує компактний HTML-блок; повний PREFLIGHT (з VARS) лишається в preflight.log.
-    PF_HTML=$(sh "$ESTIMATE_SH" --task "$D/task.md" --model "$MODEL" --compact-html 2>/dev/null)
+    PF_HTML=$(sh "$ESTIMATE_SH" --task "$D/task.md" --model "$MODEL" --kind "$TASK_KIND" --compact-html 2>/dev/null)
     if [ -n "$PF_HTML" ]; then
       notify_silent "<b>$TAG · старт</b>
 <code>$ID</code>
@@ -301,7 +301,7 @@ if [ "$BACKEND" = "codex" ] && [ -f "$D/events.jsonl" ] && command -v jq >/dev/n
   fi
 fi
 
-# Гард «нуль роботи» (30.09 estimator v2): RESULT: ok з <300 out-токенів або
+# Гард «нуль роботи» (27.09 estimator v2): RESULT: ok з <300 out-токенів або
 # без непорожнього CHANGED: — реальний інцидент 27.09 (два рани 29/78
 # out-токенів звітували ok). Переписує хвіст out.log ДО телеметрії, щоб
 # status у swarm.runs теж бачив fail, не ok.

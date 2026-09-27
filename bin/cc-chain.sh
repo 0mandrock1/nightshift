@@ -298,7 +298,7 @@ RESULTCONTRACT
   [ "$CLAUDE_EXIT" = 124 ] && log "$id: TIMEOUT — вбито по ${RUN_TIMEOUT_S}s, перевіряю чи є реальна робота нижче"
   log "$(sh "$BIN/run-usage.sh" "$d" 2>&1 | tail -1)"
   [ -f "$BIN/cc-cost.sh" ] && log "$(sh "$BIN/cc-cost.sh" "$d" 2>/dev/null | tail -1)"
-  # Гард «нуль роботи» (estimator v2, 30.09): RESULT: ok з <300 out-токенів
+  # Гард «нуль роботи» (estimator v2, 27.09): RESULT: ok з <300 out-токенів
   # або без непорожнього CHANGED: — переписує хвіст out.log на RESULT: fail
   # ДО перевірки нижче, тому ok/fail-гілка сама бачить оновлений стан. Не
   # застосовується до session-limit (той шлях не має RESULT: ok у хвості).
@@ -355,16 +355,21 @@ log "ланцюг стартував від $(git -C "$CWD" rev-parse --abbrev-r
 # Пре-фліт оцінка по першому кроку плану — грубий проксі на весь ланцюг (best-effort).
 if [ -f "$BIN/cc-estimate.sh" ]; then
   FIRST_LINE=$(grep -vE '^#|^$' "$PLAN" | head -1)
+  FIRST_SLUG=$(echo "$FIRST_LINE" | cut -d'|' -f1)
   FIRST_TASK=$(echo "$FIRST_LINE" | cut -d'|' -f3)
   FIRST_MODEL=$(echo "$FIRST_LINE" | cut -d'|' -f4)
   [ -n "$FIRST_MODEL" ] || FIRST_MODEL=sonnet
+  # task_kind для estimator v2 — той самий алгоритм, що cc_task_kind()/do_run:
+  # префікс slug-у до першого "-" (slug -> id="$slug-$STAMP"), а не basename
+  # task.md (майже завжди буквально "task.md" -> KIND=task, повз бакет model×kind).
+  FIRST_KIND=${FIRST_SLUG%%-*}
   N_STEPS=$(grep -vcE '^#|^$' "$PLAN")
   if [ -n "$FIRST_TASK" ] && [ -f "$FIRST_TASK" ]; then
-    PREFLIGHT=$(sh "$BIN/cc-estimate.sh" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$N_STEPS" --maxpar 1 2>/dev/null)
+    PREFLIGHT=$(sh "$BIN/cc-estimate.sh" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$N_STEPS" --maxpar 1 --kind "$FIRST_KIND" 2>/dev/null)
     if [ -n "$PREFLIGHT" ]; then
       log "$PREFLIGHT"
       # Telegram отримує компактний HTML-блок; повний PREFLIGHT (з VARS) лишається в лозі ланцюга.
-      PF_HTML=$(sh "$BIN/cc-estimate.sh" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$N_STEPS" --maxpar 1 --compact-html 2>/dev/null)
+      PF_HTML=$(sh "$BIN/cc-estimate.sh" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$N_STEPS" --maxpar 1 --kind "$FIRST_KIND" --compact-html 2>/dev/null)
       # --- Ризик-оцінка старту (гучна нотифікація замість тихої) ---
       # RISK=1, якщо повний PREFLIGHT містить маркер "PREFLIGHT: ⚠ дорого"
       # АБО реальне поточне завантаження 5h-вікна вище порогу CC_RISK_5H_MIN.

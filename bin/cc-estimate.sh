@@ -49,12 +49,20 @@ fi
 # task_kind для estimator v2 (group-by model×kind): --kind, інакше префікс
 # RUN_ID (якщо дали) чи інакше basename task.md до першого "-" — той самий
 # алгоритм, що бекфіл у 003_estimator_v2.sql / cc_task_kind() у cc-util-lib.sh.
+# Файл майже завжди буквально зветься "task.md" (cc-run.sh/cc-chain.sh кладуть
+# task саме під цим ім'ям у run-dir) — basename тоді дає KIND=task для
+# кожного рану, повз бакет model×kind. У цьому випадку префікс беремо з
+# ІМЕНІ БАТЬКІВСЬКОЇ ТЕКИ (run-dir виду <slug>-<stamp>/task.md).
 if [ -n "$KIND_ARG" ]; then
   TASK_KIND=$KIND_ARG
 elif [ -n "$RUN_ID" ]; then
   TASK_KIND=${RUN_ID%%-*}
 else
-  TASK_KIND=$(basename "$TASK" .md); TASK_KIND=${TASK_KIND%%-*}
+  TASK_KIND=$(basename "$TASK" .md)
+  if [ "$TASK_KIND" = "task" ]; then
+    TASK_KIND=$(basename "$(dirname "$TASK")")
+  fi
+  TASK_KIND=${TASK_KIND%%-*}
 fi
 
 CAP_ENV=${CC_CAP_ENV:-/root/projects/tg_bots/mandrock0_cc_bot/.env}
@@ -127,8 +135,10 @@ case "$HIST_N" in ''|*[!0-9]*) HIST_N=0 ;; esac
 if [ "$HIST_N" -ge 3 ]; then
   BASE_TOKENS=$HIST_TOK
   BASE_MIN=$(awk -v s="$HIST_MIN_S" 'BEGIN{printf "%.2f", s/60.0}')
-  CONF="висока"
   TOK_PCT=$(iqr_pct "$HIST_TOK" "$HIST_TOK_P25" "$HIST_TOK_P75")
+  # Впевненість — з реального розкиду (BASIS_ERR=TOK_PCT), не константа: "±97%
+  # | впевненість: висока" — суперечність, якщо висока прив'язана лише до n>=3.
+  CONF=$(awk -v e="$TOK_PCT" 'BEGIN{ if (e<=25) print "висока"; else if (e<=60) print "середня"; else print "низька" }')
   BASIS="медіана $HIST_N ранів $MODEL, ±${TOK_PCT}%"
 else
   BASE_TOKENS=$(( $(seed_tokens_in "$MODEL") + $(seed_tokens_out "$MODEL") ))
@@ -212,22 +222,28 @@ fi
 CUR5_TXT="н/д"; [ -n "$RL5_PCT" ] && CUR5_TXT="${RL5_PCT}%"
 CUR7_TXT="н/д"; [ -n "$RL7_PCT" ] && CUR7_TXT="${RL7_PCT}%"
 
-# --- estimator v2 (30.09): калібрований діапазон p25-p75 по model×kind,
+# --- estimator v2 (27.09): калібрований діапазон p25-p75 по model×kind,
 # базований на РЕАЛЬНому rate-limit (util5h/util7d ДО/ПІСЛЯ з swarm.runs),
 # не на вигаданому кепі. Базис виключає ok-рани з out<300 токенів чи
 # duration<60с (ті самі "нуль роботи"/шумові рани, що й cc_no_work_guard).
-# concurrent=0 АБО NULL: історичні рани до 30.09 concurrency не писали —
-# трактуємо відсутнє значення як "ізольований ран" (переважна більшість
-# run|lane і так були послідовні, не паралельні лейни рою).
-V2_BASIS_SQL="tokens_out >= 300 AND duration_s >= 60 AND (concurrent = 0 OR concurrent IS NULL) AND kind IN ('run','lane') AND status='ok'"
-V2_SELECT="count(*),
-  coalesce(percentile_cont(0.25) WITHIN GROUP (ORDER BY duration_s),0)/60.0,
-  coalesce(percentile_cont(0.75) WITHIN GROUP (ORDER BY duration_s),0)/60.0,
-  count(*) FILTER (WHERE util5h_after IS NOT NULL AND util5h_before IS NOT NULL),
-  coalesce(percentile_cont(0.25) WITHIN GROUP (ORDER BY (util5h_after-util5h_before)) FILTER (WHERE util5h_after IS NOT NULL AND util5h_before IS NOT NULL),0),
-  coalesce(percentile_cont(0.75) WITHIN GROUP (ORDER BY (util5h_after-util5h_before)) FILTER (WHERE util5h_after IS NOT NULL AND util5h_before IS NOT NULL),0),
-  coalesce(percentile_cont(0.25) WITHIN GROUP (ORDER BY (util7d_after-util7d_before)) FILTER (WHERE util7d_after IS NOT NULL AND util7d_before IS NOT NULL),0),
-  coalesce(percentile_cont(0.75) WITHIN GROUP (ORDER BY (util7d_after-util7d_before)) FILTER (WHERE util7d_after IS NOT NULL AND util7d_before IS NOT NULL),0)"
+# Хвилини: concurrent=0 АБО NULL — історичні рани до 27.09 concurrency не
+# писали, трактуємо відсутнє значення як "ізольований ран" (переважна
+# більшість run|lane і так були послідовні, не паралельні лейни рою).
+# Δutil (вплив на rate-limit) — СТРОГО concurrent=0, без NULL: невідома
+# конкурентність могла означати паралельний лейн рою, який ділить те саме
+# 5h/7d вікно з іншими ранами, тож Δutil з таких рядків завищує/занижує
+# калібрування. NULL там, де concurrent невідомий, не 0.
+V2_BASIS_SQL="tokens_out >= 300 AND duration_s >= 60 AND kind IN ('run','lane') AND status='ok'"
+V2_SELECT="count(*) FILTER (WHERE concurrent = 0 OR concurrent IS NULL),
+  coalesce(percentile_cont(0.25) WITHIN GROUP (ORDER BY duration_s) FILTER (WHERE concurrent = 0 OR concurrent IS NULL),0)/60.0,
+  coalesce(percentile_cont(0.75) WITHIN GROUP (ORDER BY duration_s) FILTER (WHERE concurrent = 0 OR concurrent IS NULL),0)/60.0,
+  count(*) FILTER (WHERE concurrent = 0),
+  count(*) FILTER (WHERE concurrent > 0),
+  count(*) FILTER (WHERE concurrent = 0 AND util5h_after IS NOT NULL AND util5h_before IS NOT NULL),
+  coalesce(percentile_cont(0.25) WITHIN GROUP (ORDER BY (util5h_after-util5h_before)) FILTER (WHERE concurrent = 0 AND util5h_after IS NOT NULL AND util5h_before IS NOT NULL),0),
+  coalesce(percentile_cont(0.75) WITHIN GROUP (ORDER BY (util5h_after-util5h_before)) FILTER (WHERE concurrent = 0 AND util5h_after IS NOT NULL AND util5h_before IS NOT NULL),0),
+  coalesce(percentile_cont(0.25) WITHIN GROUP (ORDER BY (util7d_after-util7d_before)) FILTER (WHERE concurrent = 0 AND util7d_after IS NOT NULL AND util7d_before IS NOT NULL),0),
+  coalesce(percentile_cont(0.75) WITHIN GROUP (ORDER BY (util7d_after-util7d_before)) FILTER (WHERE concurrent = 0 AND util7d_after IS NOT NULL AND util7d_before IS NOT NULL),0)"
 
 MK_N=0; M_N=0
 if [ -f "$CREDS" ] && command -v docker >/dev/null 2>&1 && [ -n "${PGPASSWORD:-}" ]; then
@@ -243,6 +259,7 @@ fi
 
 V2_BASIS=""; V2_MIN_LO=""; V2_MIN_HI=""; V2_DU_N=0
 V2_DU5_LO=""; V2_DU5_HI=""; V2_DU7_LO=""; V2_DU7_HI=""
+V2_N_ISO=0; V2_N_MIX=0
 if [ "$MK_N" -ge 5 ]; then
   V2_N=$MK_N; V2_ROW=$MK_OUT; V2_BASIS_DESC="${MODEL}×${TASK_KIND} n=${MK_N}"
 elif [ "$M_N" -ge 5 ]; then
@@ -254,11 +271,14 @@ fi
 if [ "${V2_N:-0}" -ge 5 ]; then
   V2_MIN_LO=$(echo "$V2_ROW" | cut -d'|' -f2 | tr -d '[:space:]')
   V2_MIN_HI=$(echo "$V2_ROW" | cut -d'|' -f3 | tr -d '[:space:]')
-  V2_DU_N=$(echo "$V2_ROW" | cut -d'|' -f4 | tr -d '[:space:]'); case "$V2_DU_N" in ''|*[!0-9]*) V2_DU_N=0 ;; esac
-  V2_DU5_LO=$(echo "$V2_ROW" | cut -d'|' -f5 | tr -d '[:space:]')
-  V2_DU5_HI=$(echo "$V2_ROW" | cut -d'|' -f6 | tr -d '[:space:]')
-  V2_DU7_LO=$(echo "$V2_ROW" | cut -d'|' -f7 | tr -d '[:space:]')
-  V2_DU7_HI=$(echo "$V2_ROW" | cut -d'|' -f8 | tr -d '[:space:]')
+  V2_N_ISO=$(echo "$V2_ROW" | cut -d'|' -f4 | tr -d '[:space:]'); case "$V2_N_ISO" in ''|*[!0-9]*) V2_N_ISO=0 ;; esac
+  V2_N_MIX=$(echo "$V2_ROW" | cut -d'|' -f5 | tr -d '[:space:]'); case "$V2_N_MIX" in ''|*[!0-9]*) V2_N_MIX=0 ;; esac
+  V2_DU_N=$(echo "$V2_ROW" | cut -d'|' -f6 | tr -d '[:space:]'); case "$V2_DU_N" in ''|*[!0-9]*) V2_DU_N=0 ;; esac
+  V2_DU5_LO=$(echo "$V2_ROW" | cut -d'|' -f7 | tr -d '[:space:]')
+  V2_DU5_HI=$(echo "$V2_ROW" | cut -d'|' -f8 | tr -d '[:space:]')
+  V2_DU7_LO=$(echo "$V2_ROW" | cut -d'|' -f9 | tr -d '[:space:]')
+  V2_DU7_HI=$(echo "$V2_ROW" | cut -d'|' -f10 | tr -d '[:space:]')
+  V2_BASIS_DESC="${V2_BASIS_DESC} (ізольованих ${V2_N_ISO}, змішаних ${V2_N_MIX})"
 
   if [ "$V2_DU_N" -ge 3 ] && [ -n "$RL5_PCT" ]; then
     P5_LO=$(awk -v c="$RL5_PCT" -v d="$V2_DU5_LO" 'BEGIN{v=c+d*100; if(v<0)v=0; printf "%.0f", v}')
