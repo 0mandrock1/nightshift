@@ -31,6 +31,8 @@ CC_CLAUDE_BIN=${CC_CLAUDE_BIN:-claude}
 BIN=$(dirname "$(readlink -f "$0")")
 CC_RUNS=${CC_RUNS:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs}
 export CC_RUNS
+# shellcheck source=cc-util-lib.sh
+[ -f "$BIN/cc-util-lib.sh" ] && . "$BIN/cc-util-lib.sh"
 
 # --- Тижневий лок (крон cc-week-guard.sh) ---
 # Присутній .week-locked -> тижневого бюджету менше порогу, cc-рани на вузлі
@@ -67,7 +69,7 @@ fi
 grep -q "^КОНТРАКТ ВИВОДУ" "$D/task.md" 2>/dev/null || cat >> "$D/task.md" <<'RESULTCONTRACT'
 
 ---
-КОНТРАКТ ВИВОДУ (обов'язково, незалежно від стилю відповіді вище): останній рядок усієї відповіді — рівно "RESULT: ok" або "RESULT: fail", без зірочок, без тексту після нього. Людський підсумок вище — ОК, але цей рядок йде строго останнім.
+КОНТРАКТ ВИВОДУ (обов'язково, незалежно від стилю відповіді вище): передостаннім рядком — "CHANGED: <файли/зміни через кому>", або "CHANGED: none", якщо реальних змін не було (порожньо чи відсутній рядок = гард нуль-роботи позначить ран як fail). Останній рядок усієї відповіді — рівно "RESULT: ok" або "RESULT: fail", без зірочок, без тексту після нього. Людський підсумок вище — ОК, але ці два рядки йдуть строго в кінці, у цьому порядку.
 RESULTCONTRACT
 
 # Sync-only: дописати обов'язкову секцію, якщо автор task.md її забув.
@@ -101,6 +103,15 @@ MODELARG=""; [ -n "$MODEL" ] && MODELARG="--model $MODEL"
 SESSID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
 [ -n "$SESSID" ] && echo "$SESSID" > "$D/session_id"
 SESSARG=""; [ -n "$SESSID" ] && SESSARG="--session-id $SESSID"
+
+# Estimator v2: util5h/7d ДО спавну і concurrency на старті (best-effort,
+# порожньо -> NULL у swarm.runs через cc-telemetry.sh). Дешевий негайний зняток,
+# не блокує спавн: снапшот, а не гейт.
+TASK_KIND=$(command -v cc_task_kind >/dev/null 2>&1 && cc_task_kind "$ID" || echo "${ID%%-*}")
+CONCURRENT_N=$(command -v cc_concurrent_others >/dev/null 2>&1 && cc_concurrent_others || echo "")
+UTIL_BEFORE=$(command -v cc_util_snapshot >/dev/null 2>&1 && cc_util_snapshot || echo "  ")
+UTIL5H_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f1)
+UTIL7D_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f2)
 
 # --- Гард дорогої моделі (cc-opus-gate.sh) ---
 # ПЕРЕД спавном: opus без CC_OPUS_REASON не стартує. Ловиться до витрати
@@ -290,10 +301,27 @@ if [ "$BACKEND" = "codex" ] && [ -f "$D/events.jsonl" ] && command -v jq >/dev/n
   fi
 fi
 
+# Гард «нуль роботи» (30.09 estimator v2): RESULT: ok з <300 out-токенів або
+# без непорожнього CHANGED: — реальний інцидент 27.09 (два рани 29/78
+# out-токенів звітували ok). Переписує хвіст out.log ДО телеметрії, щоб
+# status у swarm.runs теж бачив fail, не ok.
+command -v cc_no_work_guard >/dev/null 2>&1 && cc_no_work_guard "$D" "$BACKEND" && echo 2 > "$D/exit_code"
+
+# Estimator v2: util5h/7d ПІСЛЯ рану (best-effort) — передаються в
+# cc-telemetry.sh env-змінними разом з "до"-значеннями й concurrency.
+UTIL_AFTER=$(command -v cc_util_snapshot >/dev/null 2>&1 && cc_util_snapshot || echo "  ")
+UTIL5H_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f1)
+UTIL7D_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f2)
+
 # Телеметрія в swarm.runs (Postgres) — best-effort, ніколи не чіпає код виходу.
 # CC_TELEMETRY_KIND/CC_PARENT_RUN_ID виставляє викликач (cc-swarm.sh для лейнів/fan-in);
 # дефолт — одиночний ран поза роєм/ланцюгом.
-[ -f "$BIN/cc-telemetry.sh" ] && sh "$BIN/cc-telemetry.sh" "$D" "${CC_TELEMETRY_KIND:-run}" "${CC_PARENT_RUN_ID:-}" >/dev/null 2>&1
+if [ -f "$BIN/cc-telemetry.sh" ]; then
+  CC_UTIL5H_BEFORE="$UTIL5H_BEFORE" CC_UTIL5H_AFTER="$UTIL5H_AFTER" \
+  CC_UTIL7D_BEFORE="$UTIL7D_BEFORE" CC_UTIL7D_AFTER="$UTIL7D_AFTER" \
+  CC_CONCURRENT="$CONCURRENT_N" CC_TASK_KIND="$TASK_KIND" \
+    sh "$BIN/cc-telemetry.sh" "$D" "${CC_TELEMETRY_KIND:-run}" "${CC_PARENT_RUN_ID:-}" >/dev/null 2>&1
+fi
 
 # session limit — «прийди пізніше», окремий код, не провал задачі (як у ланцюзі).
 if grep -aq "session limit" "$D/out.log" 2>/dev/null; then

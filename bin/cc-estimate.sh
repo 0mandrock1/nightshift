@@ -21,7 +21,7 @@
 # друкує PREFLIGHT і завершується 0 (це інструмент оцінки, не гейт).
 set -u
 
-MODEL=""; TASK=""; LANES=1; MAXPAR=4; RUN_ID=""
+MODEL=""; TASK=""; LANES=1; MAXPAR=4; RUN_ID=""; KIND_ARG=""
 COMPARE=0; CHAIN_TASK=""; CHAIN_MODEL="sonnet"; COMPACT_HTML=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -30,6 +30,7 @@ while [ $# -gt 0 ]; do
     --lanes) LANES=$2; shift 2 ;;
     --maxpar) MAXPAR=$2; shift 2 ;;
     --run-id) RUN_ID=$2; shift 2 ;;
+    --kind) KIND_ARG=$2; shift 2 ;;
     --compact-html) COMPACT_HTML=1; shift ;;
     --compare) COMPARE=1; shift ;;
     --chain-task) CHAIN_TASK=$2; shift 2 ;;
@@ -43,6 +44,17 @@ done
 if [ "$COMPARE" = "1" ]; then
   [ -n "$CHAIN_TASK" ] || { echo "cc-estimate: --compare вимагає --chain-task" >&2; exit 1; }
   [ -f "$CHAIN_TASK" ] || { echo "cc-estimate: нема chain-task-файлу $CHAIN_TASK" >&2; exit 1; }
+fi
+
+# task_kind для estimator v2 (group-by model×kind): --kind, інакше префікс
+# RUN_ID (якщо дали) чи інакше basename task.md до першого "-" — той самий
+# алгоритм, що бекфіл у 003_estimator_v2.sql / cc_task_kind() у cc-util-lib.sh.
+if [ -n "$KIND_ARG" ]; then
+  TASK_KIND=$KIND_ARG
+elif [ -n "$RUN_ID" ]; then
+  TASK_KIND=${RUN_ID%%-*}
+else
+  TASK_KIND=$(basename "$TASK" .md); TASK_KIND=${TASK_KIND%%-*}
 fi
 
 CAP_ENV=${CC_CAP_ENV:-/root/projects/tg_bots/mandrock0_cc_bot/.env}
@@ -197,12 +209,82 @@ if [ "$COMPACT_HTML" = "1" ]; then
   exit 0
 fi
 
-echo "PREFLIGHT: ~${TOK_H} токенів | ${PCT_5H}% 5h-вікна | ${PCT_7D}% тижня | ~${TOTAL_MIN} хв wall-clock"
+CUR5_TXT="н/д"; [ -n "$RL5_PCT" ] && CUR5_TXT="${RL5_PCT}%"
+CUR7_TXT="н/д"; [ -n "$RL7_PCT" ] && CUR7_TXT="${RL7_PCT}%"
+
+# --- estimator v2 (30.09): калібрований діапазон p25-p75 по model×kind,
+# базований на РЕАЛЬНому rate-limit (util5h/util7d ДО/ПІСЛЯ з swarm.runs),
+# не на вигаданому кепі. Базис виключає ok-рани з out<300 токенів чи
+# duration<60с (ті самі "нуль роботи"/шумові рани, що й cc_no_work_guard).
+# concurrent=0 АБО NULL: історичні рани до 30.09 concurrency не писали —
+# трактуємо відсутнє значення як "ізольований ран" (переважна більшість
+# run|lane і так були послідовні, не паралельні лейни рою).
+V2_BASIS_SQL="tokens_out >= 300 AND duration_s >= 60 AND (concurrent = 0 OR concurrent IS NULL) AND kind IN ('run','lane') AND status='ok'"
+V2_SELECT="count(*),
+  coalesce(percentile_cont(0.25) WITHIN GROUP (ORDER BY duration_s),0)/60.0,
+  coalesce(percentile_cont(0.75) WITHIN GROUP (ORDER BY duration_s),0)/60.0,
+  count(*) FILTER (WHERE util5h_after IS NOT NULL AND util5h_before IS NOT NULL),
+  coalesce(percentile_cont(0.25) WITHIN GROUP (ORDER BY (util5h_after-util5h_before)) FILTER (WHERE util5h_after IS NOT NULL AND util5h_before IS NOT NULL),0),
+  coalesce(percentile_cont(0.75) WITHIN GROUP (ORDER BY (util5h_after-util5h_before)) FILTER (WHERE util5h_after IS NOT NULL AND util5h_before IS NOT NULL),0),
+  coalesce(percentile_cont(0.25) WITHIN GROUP (ORDER BY (util7d_after-util7d_before)) FILTER (WHERE util7d_after IS NOT NULL AND util7d_before IS NOT NULL),0),
+  coalesce(percentile_cont(0.75) WITHIN GROUP (ORDER BY (util7d_after-util7d_before)) FILTER (WHERE util7d_after IS NOT NULL AND util7d_before IS NOT NULL),0)"
+
+MK_N=0; M_N=0
+if [ -f "$CREDS" ] && command -v docker >/dev/null 2>&1 && [ -n "${PGPASSWORD:-}" ]; then
+  MK_OUT=$(docker exec -e PGPASSWORD="$PGPASSWORD" "$PG_CONTAINER" \
+    psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -tAc \
+    "SELECT $V2_SELECT FROM swarm.runs WHERE model='${MODEL}' AND task_kind='${TASK_KIND}' AND $V2_BASIS_SQL;" 2>/dev/null)
+  M_OUT=$(docker exec -e PGPASSWORD="$PGPASSWORD" "$PG_CONTAINER" \
+    psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -tAc \
+    "SELECT $V2_SELECT FROM swarm.runs WHERE model='${MODEL}' AND $V2_BASIS_SQL;" 2>/dev/null)
+  MK_N=$(echo "$MK_OUT" | cut -d'|' -f1 | tr -d '[:space:]'); case "$MK_N" in ''|*[!0-9]*) MK_N=0 ;; esac
+  M_N=$(echo "$M_OUT" | cut -d'|' -f1 | tr -d '[:space:]'); case "$M_N" in ''|*[!0-9]*) M_N=0 ;; esac
+fi
+
+V2_BASIS=""; V2_MIN_LO=""; V2_MIN_HI=""; V2_DU_N=0
+V2_DU5_LO=""; V2_DU5_HI=""; V2_DU7_LO=""; V2_DU7_HI=""
+if [ "$MK_N" -ge 5 ]; then
+  V2_N=$MK_N; V2_ROW=$MK_OUT; V2_BASIS_DESC="${MODEL}×${TASK_KIND} n=${MK_N}"
+elif [ "$M_N" -ge 5 ]; then
+  V2_N=$M_N; V2_ROW=$M_OUT; V2_BASIS_DESC="${MODEL} n=${M_N} (без kind — <5 ранів ${MODEL}×${TASK_KIND})"
+else
+  V2_N=0
+fi
+
+if [ "${V2_N:-0}" -ge 5 ]; then
+  V2_MIN_LO=$(echo "$V2_ROW" | cut -d'|' -f2 | tr -d '[:space:]')
+  V2_MIN_HI=$(echo "$V2_ROW" | cut -d'|' -f3 | tr -d '[:space:]')
+  V2_DU_N=$(echo "$V2_ROW" | cut -d'|' -f4 | tr -d '[:space:]'); case "$V2_DU_N" in ''|*[!0-9]*) V2_DU_N=0 ;; esac
+  V2_DU5_LO=$(echo "$V2_ROW" | cut -d'|' -f5 | tr -d '[:space:]')
+  V2_DU5_HI=$(echo "$V2_ROW" | cut -d'|' -f6 | tr -d '[:space:]')
+  V2_DU7_LO=$(echo "$V2_ROW" | cut -d'|' -f7 | tr -d '[:space:]')
+  V2_DU7_HI=$(echo "$V2_ROW" | cut -d'|' -f8 | tr -d '[:space:]')
+
+  if [ "$V2_DU_N" -ge 3 ] && [ -n "$RL5_PCT" ]; then
+    P5_LO=$(awk -v c="$RL5_PCT" -v d="$V2_DU5_LO" 'BEGIN{v=c+d*100; if(v<0)v=0; printf "%.0f", v}')
+    P5_HI=$(awk -v c="$RL5_PCT" -v d="$V2_DU5_HI" 'BEGIN{v=c+d*100; if(v<0)v=0; printf "%.0f", v}')
+    P7_LO=$(awk -v c="$RL7_PCT" -v d="$V2_DU7_LO" 'BEGIN{v=c+d*100; if(v<0)v=0; printf "%.0f", v}')
+    P7_HI=$(awk -v c="$RL7_PCT" -v d="$V2_DU7_HI" 'BEGIN{v=c+d*100; if(v<0)v=0; printf "%.0f", v}')
+    P5_TXT="${RL5_PCT}%→${P5_LO}–${P5_HI}%"; P7_TXT="${RL7_PCT}%→${P7_LO}–${P7_HI}%"
+    V2_BASIS="базис ${V2_BASIS_DESC} Δutil"
+  else
+    P5_TXT="${CUR5_TXT}→н/д"; P7_TXT="${CUR7_TXT}→н/д"
+    V2_BASIS="базис ${V2_BASIS_DESC}, Δutil ще не калібрований (n=${V2_DU_N}<3)"
+  fi
+  MIN_LO_H=$(awk -v m="$V2_MIN_LO" 'BEGIN{printf "%.0f", m}')
+  MIN_HI_H=$(awk -v m="$V2_MIN_HI" 'BEGIN{printf "%.0f", m}')
+  echo "PREFLIGHT: 5h ${P5_TXT} | тиждень ${P7_TXT} | ${MIN_LO_H}–${MIN_HI_H} хв | ${V2_BASIS}"
+else
+  echo "PREFLIGHT: 5h ${CUR5_TXT} | тиждень ${CUR7_TXT} | ~${TOTAL_MIN} хв | базис: грубо — токени/кеп (n<5 і по ${MODEL}×${TASK_KIND}, і по ${MODEL})"
+fi
+
+echo "PREFLIGHT (грубо, токени/кеп): ~${TOK_H} токенів | ${PCT_5H}% 5h-вікна | ${PCT_7D}% тижня | ~${TOTAL_MIN} хв wall-clock"
 echo "базис: ${BASIS} | впевненість: ${CONF} | ${CAP_BASIS}"
 awk -v p="$PCT_7D" 'BEGIN{ if (p+0 > 40) print "PREFLIGHT: ⚠ дорого" }'
 BASIS_ERR=""
 [ "$HIST_N" -ge 3 ] && BASIS_ERR=$TOK_PCT
 echo "VARS: TOKENS=$TOTAL_TOKENS PCT5H=$PCT_5H PCT7D=$PCT_7D MINUTES=$TOTAL_MIN BASIS_N=$HIST_N BASIS_ERR=$BASIS_ERR CONF=$CONF"
+echo "VARS2: KIND=$TASK_KIND V2_N=${V2_N:-0} MIN_LO=${V2_MIN_LO:-} MIN_HI=${V2_MIN_HI:-} DU_N=${V2_DU_N:-0} PCT5H_LO=${P5_LO:-} PCT5H_HI=${P5_HI:-} PCT7D_LO=${P7_LO:-} PCT7D_HI=${P7_HI:-}"
 
 # --- --compare: той самий обсяг роботи як ланцюг N послідовних кроків ---
 if [ "$COMPARE" = "1" ]; then
@@ -261,8 +343,20 @@ if [ "$COMPARE" = "1" ]; then
 fi
 
 # --- запис у swarm.estimates ДО запуску (лише якщо дали --run-id) ---
+# v2-поля пишуться лише коли є калібрований базис (V2_N>=5); інакше NULL —
+# чесно відображає "історії ще не було", не вигадане число.
+num_sql(){ case "${1:-}" in ''|*[!0-9.-]*) echo NULL ;; *) echo "$1" ;; esac; }
 if [ -n "$RUN_ID" ] && [ -f "$CREDS" ] && command -v docker >/dev/null 2>&1 && [ -n "${PGPASSWORD:-}" ]; then
-  SQL="INSERT INTO swarm.estimates (run_id, predicted_tokens, predicted_minutes, predicted_pct_5h, predicted_pct_week, estimator_version) VALUES ('$(printf '%s' "$RUN_ID" | sed "s/'/''/g")', $TOTAL_TOKENS, $TOTAL_MIN, $PCT_5H, $PCT_7D, 'cc-estimate/2');"
+  V2_MIN_LO_SQL=$(num_sql "${V2_MIN_LO:-}"); V2_MIN_HI_SQL=$(num_sql "${V2_MIN_HI:-}")
+  P5_LO_SQL=$(num_sql "${P5_LO:-}"); P5_HI_SQL=$(num_sql "${P5_HI:-}")
+  P7_LO_SQL=$(num_sql "${P7_LO:-}"); P7_HI_SQL=$(num_sql "${P7_HI:-}")
+  BASIS_TXT="${V2_BASIS:-грубо: n<5 model×kind і model}"
+  SQL="INSERT INTO swarm.estimates
+    (run_id, predicted_tokens, predicted_minutes, predicted_pct_5h, predicted_pct_week, estimator_version,
+     predicted_min_lo, predicted_min_hi, predicted_pct_5h_lo, predicted_pct_5h_hi, predicted_pct_7d_lo, predicted_pct_7d_hi, basis)
+   VALUES
+    ('$(printf '%s' "$RUN_ID" | sed "s/'/''/g")', $TOTAL_TOKENS, $TOTAL_MIN, $PCT_5H, $PCT_7D, 'cc-estimate/v2',
+     $V2_MIN_LO_SQL, $V2_MIN_HI_SQL, $P5_LO_SQL, $P5_HI_SQL, $P7_LO_SQL, $P7_HI_SQL, '$(printf '%s' "$BASIS_TXT" | sed "s/'/''/g")');"
   echo "$SQL" | docker exec -i -e PGPASSWORD="$PGPASSWORD" "$PG_CONTAINER" \
     psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -q \
     >"${CC_TELEMETRY_LOG:-$CC_RUNS/telemetry.log}.est" 2>&1 || true

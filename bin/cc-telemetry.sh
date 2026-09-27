@@ -122,22 +122,38 @@ NODE=$(hostname -f 2>/dev/null || hostname)
 PARENT_SQL="NULL"
 [ -n "$PARENT" ] && PARENT_SQL="'$(esc "$PARENT")'"
 
+# Estimator v2: util5h/7d ДО/ПІСЛЯ + concurrency + task_kind — виставляє
+# викликач (cc-run.sh/cc-chain.sh, через cc-util-lib.sh) перед викликом цього
+# скрипта. Best-effort: пусто/нечислове -> SQL NULL, телеметрія рану це не валить.
+num_or_null(){ case "${1:-}" in ''|*[!0-9.]*) echo NULL ;; *) echo "$1" ;; esac; }
+U5B_SQL=$(num_or_null "${CC_UTIL5H_BEFORE:-}")
+U5A_SQL=$(num_or_null "${CC_UTIL5H_AFTER:-}")
+U7B_SQL=$(num_or_null "${CC_UTIL7D_BEFORE:-}")
+U7A_SQL=$(num_or_null "${CC_UTIL7D_AFTER:-}")
+CONC_SQL=$(num_or_null "${CC_CONCURRENT:-}")
+TASK_KIND_SQL="NULL"
+[ -n "${CC_TASK_KIND:-}" ] && TASK_KIND_SQL="'$(esc "$CC_TASK_KIND")'"
+
 SQL="INSERT INTO swarm.runs
-  (run_id, kind, parent_run_id, node, model, started_at, finished_at, duration_s, exit_code, status, tokens_in, tokens_out, cache_read, cache_write, notes)
+  (run_id, kind, parent_run_id, node, model, started_at, finished_at, duration_s, exit_code, status, tokens_in, tokens_out, cache_read, cache_write, notes,
+   util5h_before, util5h_after, util7d_before, util7d_after, concurrent, task_kind)
 VALUES
   ('$(esc "$RUN_ID")', '$(esc "$KIND")', $PARENT_SQL, '$(esc "$NODE")', '$(esc "$MODEL")',
    to_timestamp($STARTED), to_timestamp($FINISHED), $DURATION, $EXIT_CODE_SQL, '$(esc "$STATUS")',
-   $TOKENS_IN, $TOKENS_OUT, $CACHE_R, $CACHE_W, '$(esc "$NOTES")')
+   $TOKENS_IN, $TOKENS_OUT, $CACHE_R, $CACHE_W, '$(esc "$NOTES")',
+   $U5B_SQL, $U5A_SQL, $U7B_SQL, $U7A_SQL, $CONC_SQL, $TASK_KIND_SQL)
 ON CONFLICT (run_id) DO UPDATE SET
-  finished_at = EXCLUDED.finished_at,
-  duration_s  = EXCLUDED.duration_s,
-  exit_code   = EXCLUDED.exit_code,
-  status      = EXCLUDED.status,
-  tokens_in   = EXCLUDED.tokens_in,
-  tokens_out  = EXCLUDED.tokens_out,
-  cache_read  = EXCLUDED.cache_read,
-  cache_write = EXCLUDED.cache_write,
-  notes       = EXCLUDED.notes;
+  finished_at   = EXCLUDED.finished_at,
+  duration_s    = EXCLUDED.duration_s,
+  exit_code     = EXCLUDED.exit_code,
+  status        = EXCLUDED.status,
+  tokens_in     = EXCLUDED.tokens_in,
+  tokens_out    = EXCLUDED.tokens_out,
+  cache_read    = EXCLUDED.cache_read,
+  cache_write   = EXCLUDED.cache_write,
+  notes         = EXCLUDED.notes,
+  util5h_after  = COALESCE(EXCLUDED.util5h_after, swarm.runs.util5h_after),
+  util7d_after  = COALESCE(EXCLUDED.util7d_after, swarm.runs.util7d_after);
 
 UPDATE swarm.estimates SET actual_tokens = $((TOKENS_IN + TOKENS_OUT)), actual_minutes = ROUND(($DURATION / 60.0)::numeric, 2)
   WHERE run_id = '$(esc "$RUN_ID")';"

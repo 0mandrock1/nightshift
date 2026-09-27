@@ -19,6 +19,7 @@ echo "Нічого не роби." > "$D_OK/task.md"
 STUB_OK="$TMP/stub-claude-ok.sh"
 cat > "$STUB_OK" <<'EOF'
 #!/bin/sh
+echo "CHANGED: none"
 echo "RESULT: ok"
 EOF
 chmod +x "$STUB_OK"

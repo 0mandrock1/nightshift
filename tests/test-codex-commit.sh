@@ -34,12 +34,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 echo '{"type":"thread.started"}' >&2
+CHVAL="none"
 if [ "${CC_STUB_CHANGE:-0}" = "1" ]; then
   echo "змінено codex-stub'ом" >> f
+  CHVAL="f"
 fi
-# NOTES перед RESULT — той самий порядок, що вимагає реальний контракт
-# task.md (RESULT завжди строго останній рядок відповіді).
-printf 'NOTES: stub codex-commit test\nRESULT: ok\n' > "$OUT"
+# turn.completed на stdout -> events.jsonl, output_tokens>=300 щоб не
+# зачепити cc_no_work_guard (estimator v2, 30.09) — фейковий codex інакше
+# завжди мав out=0, guard переписував би RESULT на fail до перевірок нижче.
+echo '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":400}}'
+# NOTES/CHANGED перед RESULT — той самий порядок, що вимагає реальний контракт
+# task.md (CHANGED передостаннім, RESULT завжди строго останній рядок відповіді).
+printf 'NOTES: stub codex-commit test\nCHANGED: %s\nRESULT: ok\n' "$CHVAL" > "$OUT"
 exit 0
 EOF
 chmod +x "$STUB"

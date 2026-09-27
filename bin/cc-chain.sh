@@ -43,6 +43,19 @@ BIN=$(dirname "$(readlink -f "$0")")
 CC_RUNS=${CC_RUNS:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs}
 export CC_RUNS
 RUNS=$CC_RUNS
+# shellcheck source=cc-util-lib.sh
+[ -f "$BIN/cc-util-lib.sh" ] && . "$BIN/cc-util-lib.sh"
+
+# Обгортка cc-telemetry.sh, що прокидає estimator-v2 змінні (UTIL5H_BEFORE/
+# CONCURRENT_N/TASK_KIND виставляє do_run() ДО спавну, UTIL5H_AFTER — ПІСЛЯ,
+# усі як глобальні змінні процесу; окремих аргументів не потребує).
+chain_telemetry(){
+  [ -f "$BIN/cc-telemetry.sh" ] || return 0
+  CC_UTIL5H_BEFORE="${UTIL5H_BEFORE:-}" CC_UTIL5H_AFTER="${UTIL5H_AFTER:-}" \
+  CC_UTIL7D_BEFORE="${UTIL7D_BEFORE:-}" CC_UTIL7D_AFTER="${UTIL7D_AFTER:-}" \
+  CC_CONCURRENT="${CONCURRENT_N:-}" CC_TASK_KIND="${TASK_KIND:-}" \
+    sh "$BIN/cc-telemetry.sh" "$1" "${2:-run}" >/dev/null 2>&1
+}
 
 # --- Тижневий лок (крон cc-week-guard.sh) ---
 # Присутній .week-locked -> тижневого бюджету менше порогу, cc-рани на вузлі
@@ -230,8 +243,16 @@ do_run(){
   cat >> "$d/task.md" <<'RESULTCONTRACT'
 
 ---
-КОНТРАКТ ВИВОДУ (обов'язково, незалежно від стилю відповіді вище): останній рядок усієї відповіді — рівно "RESULT: ok" або "RESULT: fail", без зірочок, без тексту після нього. Людський підсумок вище — ОК, але цей рядок йде строго останнім.
+КОНТРАКТ ВИВОДУ (обов'язково, незалежно від стилю відповіді вище): передостаннім рядком — "CHANGED: <файли/зміни через кому>", або "CHANGED: none", якщо реальних змін не було (порожньо чи відсутній рядок = гард нуль-роботи позначить ран як fail). Останній рядок усієї відповіді — рівно "RESULT: ok" або "RESULT: fail", без зірочок, без тексту після нього. Людський підсумок вище — ОК, але ці два рядки йдуть строго в кінці, у цьому порядку.
 RESULTCONTRACT
+  # Estimator v2: util5h/7d ДО спавну + concurrency на старті + task_kind
+  # (best-effort, порожньо -> NULL у swarm.runs). Той самий снапшот, що
+  # cc-run.sh, спільна функція з cc-util-lib.sh.
+  TASK_KIND=$(command -v cc_task_kind >/dev/null 2>&1 && cc_task_kind "$id" || echo "${id%%-*}")
+  CONCURRENT_N=$(command -v cc_concurrent_others >/dev/null 2>&1 && cc_concurrent_others || echo "")
+  UTIL_BEFORE=$(command -v cc_util_snapshot >/dev/null 2>&1 && cc_util_snapshot || echo "  ")
+  UTIL5H_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f1)
+  UTIL7D_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f2)
   log "$id старт (backend=$backend, style=$style, base=$(cut -c1-7 < $d/base_sha))"
   # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0: без цього headless-сесія може
   # вийти по стелі очікування фонової задачі (Task/background bash),
@@ -277,10 +298,21 @@ RESULTCONTRACT
   [ "$CLAUDE_EXIT" = 124 ] && log "$id: TIMEOUT — вбито по ${RUN_TIMEOUT_S}s, перевіряю чи є реальна робота нижче"
   log "$(sh "$BIN/run-usage.sh" "$d" 2>&1 | tail -1)"
   [ -f "$BIN/cc-cost.sh" ] && log "$(sh "$BIN/cc-cost.sh" "$d" 2>/dev/null | tail -1)"
+  # Гард «нуль роботи» (estimator v2, 30.09): RESULT: ok з <300 out-токенів
+  # або без непорожнього CHANGED: — переписує хвіст out.log на RESULT: fail
+  # ДО перевірки нижче, тому ok/fail-гілка сама бачить оновлений стан. Не
+  # застосовується до session-limit (той шлях не має RESULT: ok у хвості).
+  command -v cc_no_work_guard >/dev/null 2>&1 && cc_no_work_guard "$d" "$backend"
+  # Estimator v2: util5h/7d ПІСЛЯ рану — до telemetry, разом з "до"-значеннями.
+  # Рахується ОДИН раз тут (до session-limit гілки), щоб той самий знімок
+  # ішов у telemetry незалежно від того, якою гілкою вийде цей крок.
+  UTIL_AFTER=$(command -v cc_util_snapshot >/dev/null 2>&1 && cc_util_snapshot || echo "  ")
+  UTIL5H_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f1)
+  UTIL7D_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f2)
   if grep -aq "session limit" "$d/out.log"; then
     log "$id: SESSION LIMIT — ланцюг спинено, це не провал задачі"
     echo 3 > "$d/exit_code"
-    [ -f "$BIN/cc-telemetry.sh" ] && sh "$BIN/cc-telemetry.sh" "$d" run >/dev/null 2>&1
+    chain_telemetry "$d" run
     notify "⛔ $TAG · session limit · <code>$id</code> · $PASSED ok до цього · exit 3"; exit 3
   fi
   if [ -n "$(git status --porcelain)" ]; then
@@ -289,7 +321,7 @@ RESULTCONTRACT
   if tail -40 "$d/out.log" | grep -aqE "RESULT:[[:space:]]*\**[[:space:]]*ok"; then
     log "$id: ok ($(git rev-parse --short HEAD))"
     echo 0 > "$d/exit_code"
-    [ -f "$BIN/cc-telemetry.sh" ] && sh "$BIN/cc-telemetry.sh" "$d" run >/dev/null 2>&1
+    chain_telemetry "$d" run
     PASSED=$((PASSED+1)); notify "✅ $TAG · run ok · <code>$(git rev-parse --short HEAD)</code> · пройдено $PASSED"
   else
     if [ "$CLAUDE_EXIT" = 0 ]; then
@@ -305,7 +337,7 @@ RESULTCONTRACT
       fi
       log "$id: AMBIGUOUS — claude завершився чисто, $RMSG — ланцюг спинено для ручної перевірки, гілка лишена"
       echo 4 > "$d/exit_code"
-      [ -f "$BIN/cc-telemetry.sh" ] && sh "$BIN/cc-telemetry.sh" "$d" run >/dev/null 2>&1
+      chain_telemetry "$d" run
       notify "⚠️ $TAG · ambiguous · <code>$id</code> · $PASSED ok до цього · exit 4 · $RMSG, перевір вручну · гілку лишено"; exit 4
     fi
     R=OK-FAIL
@@ -314,7 +346,7 @@ RESULTCONTRACT
     echo "$R" > "$d/fail_reason"
     log "$id: FAIL [$R] — ланцюг спинено, гілка лишена як є для розбору"
     echo 2 > "$d/exit_code"
-    [ -f "$BIN/cc-telemetry.sh" ] && sh "$BIN/cc-telemetry.sh" "$d" run >/dev/null 2>&1
+    chain_telemetry "$d" run
     notify "❌ $TAG · run fail [$R] · <code>$id</code> · $PASSED ok до цього · exit 2 · гілку лишено"; exit 2
   fi
 }

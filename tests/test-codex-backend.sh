@@ -50,8 +50,10 @@ case "${CC_TEST_SCENARIO:-}" in
   ok)
     echo '{"type":"thread.started"}'
     echo '{"type":"turn.started"}'
-    echo '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":10}}'
-    printf 'RESULT: ok\nNOTES: stub ok\n' > "$OUT"
+    # output_tokens>=300 і CHANGED — щоб не зачепити cc_no_work_guard
+    # (estimator v2, 30.09): фейковий codex інакше завжди мав out=0.
+    echo '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":400}}'
+    printf 'NOTES: stub ok\nCHANGED: stub\nRESULT: ok\n' > "$OUT"
     exit 0
     ;;
   fail)

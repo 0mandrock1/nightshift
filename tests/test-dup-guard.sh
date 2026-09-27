@@ -23,6 +23,7 @@ chmod +x "$NOTIFY_STUB"
 CLAUDE_STUB="$TMP/claude.sh"
 cat > "$CLAUDE_STUB" <<'EOF'
 #!/bin/sh
+echo "CHANGED: none"
 echo "RESULT: ok"
 EOF
 chmod +x "$CLAUDE_STUB"
