@@ -221,6 +221,11 @@ Schema `swarm` in Postgres (`sql/001_swarm_schema.sql`, idempotent):
 - **`swarm.routes`** — the swarm-vs-chain-vs-hybrid routing decision, kept
   for audit.
 
+Swarm lanes set `task_kind` to their own lane slug (`CC_KIND` in
+`cc-swarm.sh`, read by `cc_task_kind()` in `cc-util-lib.sh`), not the swarm
+campaign id — so `cc-estimate.sh` v2's model×kind calibration groups by the
+lane's actual task type instead of lumping every lane of a swarm together.
+
 `run_id` on `estimates`/`routes`/`verifications` is deliberately **not** a
 foreign key on `runs` — both are written before the run itself exists.
 

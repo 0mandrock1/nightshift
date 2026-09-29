@@ -296,7 +296,10 @@ run_lane(){
       ;;
     *)
       cd "$WT" || { printf '%s\t-\t-\tfail\tcd worktree впав\n' "$slug" > "$PART"; return 2; }
-      CC_TELEMETRY_KIND=lane CC_PARENT_RUN_ID="$SWARM_ID" \
+      # CC_KIND=slug лейна: калібрування model×kind у cc-estimate.sh v2 йде за
+      # типом задачі лейна, не за назвою кампанії (SWARM_ID). Історичні lane-записи
+      # в swarm.runs лишаються з kind=префікс swarm-id — без міграції.
+      CC_TELEMETRY_KIND=lane CC_PARENT_RUN_ID="$SWARM_ID" CC_KIND="$slug" \
         timeout "${LANE_TIMEOUT}s" sh "$CC_RUN_SH" "$d" "$style" "$model" "$backend" > "$d/lane.log" 2>&1
       RC=$?
       ;;
