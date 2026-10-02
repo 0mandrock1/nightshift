@@ -285,7 +285,12 @@ RESULTCONTRACT
     [ -f "$d/last-message.txt" ] && cat "$d/last-message.txt" >> "$d/out.log"
     # turn.failed / квота / rate-limit в events.jsonl -> той самий шлях
     # "session limit" нижче, що вже ловить claude-гілку (exit 3).
-    if [ -f "$d/events.jsonl" ] && grep -aqiE '"type":"turn\.failed"|rate.?limit|quota|usage_limit' "$d/events.jsonl"; then
+    # Лише error реального turn.failed (як у cc-run.sh). НЕ grep по всьому
+    # events.jsonl: task/command/agent text легітимно містить rate-limit/quota
+    # (напр. ratelimit.py, "429 rate_limited") і давав хибний exit 3 після
+    # RESULT: ok (02.10, tt2-e2e4 і nsfix).
+    if [ "$CLAUDE_EXIT" != 124 ] && [ -f "$d/events.jsonl" ] && command -v jq >/dev/null 2>&1 \
+      && jq -se 'any(.[]; .type=="turn.failed" and (((.error.message // .error // "") | tostring) | test("rate.?limit|quota|usage_limit|session limit"; "i")))' "$d/events.jsonl" >/dev/null 2>&1; then
       echo "session limit" >> "$d/out.log"
     fi
   elif [ "$style" = "none" ]; then
