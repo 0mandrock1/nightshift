@@ -216,9 +216,11 @@ if [ "$BACKEND" = "codex" ]; then
   # працювали для обох бекендів без змін.
   [ -f "$D/last-message.txt" ] && cat "$D/last-message.txt" >> "$D/out.log"
 
-  # turn.failed / квота / rate-limit в events.jsonl -> той самий шлях "session
-  # limit", що вже нижче ловить claude-гілку (exit 3, та сама нотифікація).
-  if [ -f "$D/events.jsonl" ] && grep -aqiE '"type":"turn\.failed"|rate.?limit|quota|usage_limit' "$D/events.jsonl"; then
+  # Codex quota/session-limit: дивимось ТІЛЬКИ на error реального turn.failed.
+  # Не grep по всьому events.jsonl: task/agent/command text легітимно містить
+  # слова rate-limit/quota і раніше давав false positive на звичайному timeout.
+  if [ "$RC" != 124 ] && [ -f "$D/events.jsonl" ] && command -v jq >/dev/null 2>&1 \
+    && jq -se 'any(.[]; .type=="turn.failed" and (((.error.message // .error // "") | tostring) | test("rate.?limit|quota|usage_limit|session limit"; "i")))' "$D/events.jsonl" >/dev/null 2>&1; then
     echo "session limit" >> "$D/out.log"
   fi
 
@@ -331,8 +333,17 @@ if [ -f "$BIN/cc-telemetry.sh" ]; then
     sh "$BIN/cc-telemetry.sh" "$D" "${CC_TELEMETRY_KIND:-run}" "${CC_PARENT_RUN_ID:-}" >/dev/null 2>&1
 fi
 
+# timeout має вищий пріоритет за будь-яку текстову класифікацію помилки.
+# GNU timeout повертає 124: це не quota і не session limit.
+if [ "$RC" = 124 ]; then
+  echo "TIMEOUT" > "$D/fail_reason"
+  notify "⏱️ $TAG · timeout · <code>$ID</code> · ліміт ${RUN_TIMEOUT_S:-?}s · exit 124"
+  exit 124
+fi
+
 # session limit — «прийди пізніше», окремий код, не провал задачі (як у ланцюзі).
-if grep -aq "session limit" "$D/out.log" 2>/dev/null; then
+# Матчимо окремий marker-рядок, а не довільну згадку в agent output.
+if grep -aqE '^[[:space:]]*session limit([[:space:]]|$)' "$D/out.log" 2>/dev/null; then
   notify "⛔ $TAG · session limit · <code>$ID</code> · ран не доїхав, прийди пізніше · exit 3"
   exit 3
 fi

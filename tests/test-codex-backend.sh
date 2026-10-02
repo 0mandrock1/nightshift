@@ -4,6 +4,7 @@
 #   ok      -> exit 0, RESULT ok зі stub-таки last-message.txt дописаний в out.log
 #   fail    -> exit 2, RESULT fail
 #   quota   -> turn.failed/rate-limit в events.jsonl -> exit 3 (session limit)
+#   timeout-noise -> exit 124 навіть якщо event text містить rate-limit/quota слова
 #   sol     -> model=gpt-6-sol без CC_OPUS_REASON -> exit 6, codex НЕ спавниться
 #   sonnet  -> model=sonnet мапиться на -m gpt-6-luna (перевірка через stub-лог)
 set -u
@@ -67,6 +68,11 @@ case "${CC_TEST_SCENARIO:-}" in
     echo '{"type":"turn.failed","error":{"message":"rate_limit_exceeded: quota exhausted"}}'
     exit 1
     ;;
+  timeout-noise)
+    echo '{"type":"thread.started"}'
+    echo '{"type":"agent_message","text":"docs mention rate-limit quota usage_limit but this is not a quota failure"}'
+    exit 124
+    ;;
   *)
     exit 1
     ;;
@@ -106,6 +112,12 @@ run_case case-quota sonnet quota; RC=$?
 [ "$RC" = "3" ] || { echo "FAIL: quota-кейс очікував exit 3, отримав $RC"; FAIL=1; }
 grep -q "session limit" "$RUNS/case-quota/out.log" 2>/dev/null || { echo "FAIL: quota не позначено як session limit"; FAIL=1; }
 
+# --- timeout 124 має перемагати текстовий noise з rate-limit/quota ---
+run_case case-timeout-noise sonnet timeout-noise; RC=$?
+[ "$RC" = "124" ] || { echo "FAIL: timeout-noise очікував exit 124, отримав $RC"; FAIL=1; }
+[ "$(cat "$RUNS/case-timeout-noise/fail_reason" 2>/dev/null)" = "TIMEOUT" ] || { echo "FAIL: timeout-noise не записав fail_reason=TIMEOUT"; FAIL=1; }
+if grep -q '^session limit' "$RUNS/case-timeout-noise/out.log" 2>/dev/null; then echo "FAIL: timeout-noise хибно класифіковано як session limit"; FAIL=1; fi
+
 # --- gpt-6-sol без CC_OPUS_REASON -> 6, codex не спавниться ---
 : > "$STUBLOG"
 run_case case-sol gpt-6-sol ok ""; RC=$?
@@ -120,4 +132,4 @@ LOGGED=$(cat "$STUBLOG" 2>/dev/null)
 [ "$LOGGED" = "gpt-6-luna" ] || { echo "FAIL: sonnet мав мапитись на gpt-6-luna, stub отримав '$LOGGED'"; FAIL=1; }
 
 if [ "$FAIL" = "1" ]; then exit 1; fi
-echo "OK: codex-бекенд — ok/fail/quota->3/sol-без-причини->6/sonnet->gpt-6-luna"
+echo "OK: codex-бекенд — ok/fail/quota->3/timeout-noise->124/sol-без-причини->6/sonnet->gpt-6-luna"
