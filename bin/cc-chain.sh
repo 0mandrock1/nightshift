@@ -358,6 +358,16 @@ if [ -f "$BIN/cc-estimate.sh" ]; then
   FIRST_SLUG=$(echo "$FIRST_LINE" | cut -d'|' -f1)
   FIRST_TASK=$(echo "$FIRST_LINE" | cut -d'|' -f3)
   FIRST_MODEL=$(echo "$FIRST_LINE" | cut -d'|' -f4)
+  FIRST_BACKEND=$(echo "$FIRST_LINE" | cut -d'|' -f5)
+  [ -n "$FIRST_BACKEND" ] || FIRST_BACKEND=$CC_BACKEND
+  case "$FIRST_BACKEND" in
+    claude|codex) : ;;
+    *) log "$FIRST_SLUG: невідомий backend '$FIRST_BACKEND' (очікую claude|codex) — ланцюг спинено"; exit 1 ;;
+  esac
+  MIXED_BACKEND=$(awk -F'|' -v first="$FIRST_BACKEND" -v fallback="$CC_BACKEND" '
+    $0 !~ /^#/ && $0 !~ /^$/ { backend=$5; if (backend=="") backend=fallback; if (backend!=first) { print backend; exit } }
+  ' "$PLAN")
+  [ -z "$MIXED_BACKEND" ] || log "змішаний план: preflight для першого backend=$FIRST_BACKEND; далі є backend=$MIXED_BACKEND"
   [ -n "$FIRST_MODEL" ] || FIRST_MODEL=sonnet
   # task_kind для estimator v2 — той самий алгоритм, що cc_task_kind()/do_run:
   # префікс slug-у до першого "-" (slug -> id="$slug-$STAMP"), а не basename
@@ -365,11 +375,12 @@ if [ -f "$BIN/cc-estimate.sh" ]; then
   FIRST_KIND=${FIRST_SLUG%%-*}
   N_STEPS=$(grep -vcE '^#|^$' "$PLAN")
   if [ -n "$FIRST_TASK" ] && [ -f "$FIRST_TASK" ]; then
-    PREFLIGHT=$(sh "$BIN/cc-estimate.sh" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$N_STEPS" --maxpar 1 --kind "$FIRST_KIND" --backend "$CC_BACKEND" 2>/dev/null)
+    PREFLIGHT=$(sh "$BIN/cc-estimate.sh" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$N_STEPS" --maxpar 1 --kind "$FIRST_KIND" --backend "$FIRST_BACKEND" 2>/dev/null)
     if [ -n "$PREFLIGHT" ]; then
+      log "preflight: backend=$FIRST_BACKEND"
       log "$PREFLIGHT"
       # Telegram отримує компактний HTML-блок; повний PREFLIGHT (з VARS) лишається в лозі ланцюга.
-      PF_HTML=$(sh "$BIN/cc-estimate.sh" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$N_STEPS" --maxpar 1 --kind "$FIRST_KIND" --backend "$CC_BACKEND" --compact-html 2>/dev/null)
+      PF_HTML=$(sh "$BIN/cc-estimate.sh" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$N_STEPS" --maxpar 1 --kind "$FIRST_KIND" --backend "$FIRST_BACKEND" --compact-html 2>/dev/null)
       # --- Ризик-оцінка старту (гучна нотифікація замість тихої) ---
       # RISK=1, якщо повний PREFLIGHT містить маркер "PREFLIGHT: ⚠ дорого"
       # АБО реальне поточне завантаження 5h-вікна вище порогу CC_RISK_5H_MIN.
@@ -381,7 +392,7 @@ if [ -f "$BIN/cc-estimate.sh" ]; then
       CC_RISK_5H_MIN=${CC_RISK_5H_MIN:-70}
       RISK_USAGE_CLI=${CC_USAGE_CLI:-/root/projects/tg_bots/mandrock0_cc_bot/usage-cli.js}
       UTIL5H=""
-      if [ "$CC_BACKEND" = "codex" ] && [ -x "$BIN/cc-codex-usage.sh" ]; then
+      if [ "$FIRST_BACKEND" = "codex" ] && [ -x "$BIN/cc-codex-usage.sh" ]; then
         UTIL5H=$(sh "$BIN/cc-codex-usage.sh" --tuple 2>/dev/null | cut -d' ' -f1)
       elif command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && [ -f "$RISK_USAGE_CLI" ]; then
         UTIL5H=$(node "$RISK_USAGE_CLI" --ratelimit-json 2>/dev/null | jq -r '.util5h // empty' 2>/dev/null)
@@ -410,18 +421,18 @@ if [ -f "$BIN/cc-estimate.sh" ]; then
       if [ -n "$PF_HTML" ]; then
         if [ "$RISK" = 1 ]; then
           notify "⚠ РИЗИКОВИЙ СТАРТ · $RISK_REASON
-<b>$TAG · старт ланцюга · $N_STEPS кроків</b>
+<b>$TAG · старт ланцюга · $N_STEPS кроків · backend=$FIRST_BACKEND</b>
 $PF_HTML"
         else
-          notify_silent "<b>$TAG · старт ланцюга · $N_STEPS кроків</b>
+          notify_silent "<b>$TAG · старт ланцюга · $N_STEPS кроків · backend=$FIRST_BACKEND</b>
 $PF_HTML"
         fi
       else
         if [ "$RISK" = 1 ]; then
           notify "⚠ РИЗИКОВИЙ СТАРТ · $RISK_REASON
-$TAG: старт ланцюга ($N_STEPS кроків) | $PREFLIGHT"
+$TAG: старт ланцюга ($N_STEPS кроків, backend=$FIRST_BACKEND) | $PREFLIGHT"
         else
-          notify_silent "$TAG: старт ланцюга ($N_STEPS кроків) | $PREFLIGHT"
+          notify_silent "$TAG: старт ланцюга ($N_STEPS кроків, backend=$FIRST_BACKEND) | $PREFLIGHT"
         fi
       fi
     fi
