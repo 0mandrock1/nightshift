@@ -222,7 +222,7 @@ if [ -f "$CC_ESTIMATE_SH" ]; then
   FIRST_MODEL=$(awk -F'|' '$1!="" && $1!~/^#/{print ($4==""?"haiku":$4); exit}' "$PLAN_ABS")
   FIRST_TASK=$(awk -F'|' '$1!="" && $1!~/^#/{print $2; exit}' "$PLAN_ABS")
   case "$FIRST_MODEL" in local:*) FIRST_MODEL=haiku ;; esac
-  PREFLIGHT=$(sh "$CC_ESTIMATE_SH" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$LANE_N" --maxpar "$MAXPAR" --run-id "$SWARM_ID" 2>/dev/null)
+  PREFLIGHT=$(sh "$CC_ESTIMATE_SH" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$LANE_N" --maxpar "$MAXPAR" --run-id "$SWARM_ID" --backend "$CC_BACKEND" 2>/dev/null)
   [ -n "$PREFLIGHT" ] && log "$PREFLIGHT"
 fi
 

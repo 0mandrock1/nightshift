@@ -21,7 +21,7 @@
 # друкує PREFLIGHT і завершується 0 (це інструмент оцінки, не гейт).
 set -u
 
-MODEL=""; TASK=""; LANES=1; MAXPAR=4; RUN_ID=""; KIND_ARG=""
+MODEL=""; TASK=""; LANES=1; MAXPAR=4; RUN_ID=""; KIND_ARG=""; BACKEND=${CC_BACKEND:-claude}
 COMPARE=0; CHAIN_TASK=""; CHAIN_MODEL="sonnet"; COMPACT_HTML=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -31,6 +31,7 @@ while [ $# -gt 0 ]; do
     --maxpar) MAXPAR=$2; shift 2 ;;
     --run-id) RUN_ID=$2; shift 2 ;;
     --kind) KIND_ARG=$2; shift 2 ;;
+    --backend) BACKEND=$2; shift 2 ;;
     --compact-html) COMPACT_HTML=1; shift ;;
     --compare) COMPARE=1; shift ;;
     --chain-task) CHAIN_TASK=$2; shift 2 ;;
@@ -165,17 +166,30 @@ fi
 PCT_5H=$(awk -v t="$TOTAL_TOKENS" -v c="$P5H_CAP" 'BEGIN{printf "%.1f", (c>0)?(100.0*t/c):0}')
 PCT_7D=$(awk -v t="$TOTAL_TOKENS" -v c="$P7D_CAP" 'BEGIN{printf "%.1f", (c>0)?(100.0*t/c):0}')
 
-# --- РЕАЛЬНИЙ % завантаження вікон із заголовків Anthropic (best-effort, ЛИШЕ для показу) ---
+# --- Поточне завантаження usage windows, backend-aware (best-effort) ---
 RL5_PCT=""; RL7_PCT=""; RL_SOURCE=""
-USAGE_CLI=${CC_USAGE_CLI:-/root/projects/tg_bots/mandrock0_cc_bot/usage-cli.js}
-if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && [ -f "$USAGE_CLI" ]; then
-  RLJSON=$(node "$USAGE_CLI" --ratelimit-json 2>/dev/null)
-  if [ -n "$RLJSON" ]; then
-    U5=$(printf '%s' "$RLJSON" | jq -r '.util5h // empty' 2>/dev/null)
-    U7=$(printf '%s' "$RLJSON" | jq -r '.util7d // empty' 2>/dev/null)
-    RL_SOURCE=$(printf '%s' "$RLJSON" | jq -r '.source // empty' 2>/dev/null)
-    case "$U5" in ''|*[!0-9.]*) ;; *) RL5_PCT=$(awk -v u="$U5" 'BEGIN{printf "%.1f", u*100}') ;; esac
-    case "$U7" in ''|*[!0-9.]*) ;; *) RL7_PCT=$(awk -v u="$U7" 'BEGIN{printf "%.1f", u*100}') ;; esac
+# cc-run передає вже знятий snapshot, щоб не робити повторні RPC/API reads.
+case "${CC_EST_UTIL5H:-}" in ''|*[!0-9.]*) ;; *) RL5_PCT=$(awk -v u="$CC_EST_UTIL5H" 'BEGIN{printf "%.1f",u*100}') ;; esac
+case "${CC_EST_UTIL7D:-}" in ''|*[!0-9.]*) ;; *) RL7_PCT=$(awk -v u="$CC_EST_UTIL7D" 'BEGIN{printf "%.1f",u*100}') ;; esac
+RL_SOURCE=${CC_EST_UTIL_SOURCE:-}
+if [ -z "$RL5_PCT" ] || [ -z "$RL7_PCT" ]; then
+  if [ "$BACKEND" = "codex" ] && [ -x "$(dirname "$0")/cc-codex-usage.sh" ]; then
+    CUS=$(sh "$(dirname "$0")/cc-codex-usage.sh" --tuple 2>/dev/null || echo "  ")
+    U5=$(echo "$CUS" | cut -d' ' -f1); U7=$(echo "$CUS" | cut -d' ' -f2); RL_SOURCE=$(echo "$CUS" | cut -d' ' -f3)
+    case "$U5" in ''|*[!0-9.]*) ;; *) RL5_PCT=$(awk -v u="$U5" 'BEGIN{printf "%.1f",u*100}') ;; esac
+    case "$U7" in ''|*[!0-9.]*) ;; *) RL7_PCT=$(awk -v u="$U7" 'BEGIN{printf "%.1f",u*100}') ;; esac
+  else
+    USAGE_CLI=${CC_USAGE_CLI:-/root/projects/tg_bots/mandrock0_cc_bot/usage-cli.js}
+    if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && [ -f "$USAGE_CLI" ]; then
+      RLJSON=$(node "$USAGE_CLI" --ratelimit-json 2>/dev/null)
+      if [ -n "$RLJSON" ]; then
+        U5=$(printf '%s' "$RLJSON" | jq -r '.util5h // empty' 2>/dev/null)
+        U7=$(printf '%s' "$RLJSON" | jq -r '.util7d // empty' 2>/dev/null)
+        RL_SOURCE=$(printf '%s' "$RLJSON" | jq -r '.source // empty' 2>/dev/null)
+        case "$U5" in ''|*[!0-9.]*) ;; *) RL5_PCT=$(awk -v u="$U5" 'BEGIN{printf "%.1f",u*100}') ;; esac
+        case "$U7" in ''|*[!0-9.]*) ;; *) RL7_PCT=$(awk -v u="$U7" 'BEGIN{printf "%.1f",u*100}') ;; esac
+      fi
+    fi
   fi
 fi
 
@@ -207,7 +221,9 @@ if [ "$COMPACT_HTML" = "1" ]; then
   if [ "$RL_SOURCE" = "stale" ]; then
     BASIS_H="${BASIS_H} · ⚠ ліміт з протухлого кешу"
   elif [ -z "$RL5_PCT" ]; then
-    BASIS_H="${BASIS_H} · ⚠ без реального %"
+    BASIS_H="${BASIS_H} · ⚠ без real usage"
+  elif [ -n "$RL_SOURCE" ]; then
+    BASIS_H="${BASIS_H} · ${RL_SOURCE}"
   fi
   printf '<pre>\n'
   printf 'токени    %s\n' "~${TOK_H}"

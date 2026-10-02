@@ -365,11 +365,11 @@ if [ -f "$BIN/cc-estimate.sh" ]; then
   FIRST_KIND=${FIRST_SLUG%%-*}
   N_STEPS=$(grep -vcE '^#|^$' "$PLAN")
   if [ -n "$FIRST_TASK" ] && [ -f "$FIRST_TASK" ]; then
-    PREFLIGHT=$(sh "$BIN/cc-estimate.sh" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$N_STEPS" --maxpar 1 --kind "$FIRST_KIND" 2>/dev/null)
+    PREFLIGHT=$(sh "$BIN/cc-estimate.sh" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$N_STEPS" --maxpar 1 --kind "$FIRST_KIND" --backend "$CC_BACKEND" 2>/dev/null)
     if [ -n "$PREFLIGHT" ]; then
       log "$PREFLIGHT"
       # Telegram отримує компактний HTML-блок; повний PREFLIGHT (з VARS) лишається в лозі ланцюга.
-      PF_HTML=$(sh "$BIN/cc-estimate.sh" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$N_STEPS" --maxpar 1 --kind "$FIRST_KIND" --compact-html 2>/dev/null)
+      PF_HTML=$(sh "$BIN/cc-estimate.sh" --task "$FIRST_TASK" --model "$FIRST_MODEL" --lanes "$N_STEPS" --maxpar 1 --kind "$FIRST_KIND" --backend "$CC_BACKEND" --compact-html 2>/dev/null)
       # --- Ризик-оцінка старту (гучна нотифікація замість тихої) ---
       # RISK=1, якщо повний PREFLIGHT містить маркер "PREFLIGHT: ⚠ дорого"
       # АБО реальне поточне завантаження 5h-вікна вище порогу CC_RISK_5H_MIN.
@@ -380,8 +380,13 @@ if [ -f "$BIN/cc-estimate.sh" ]; then
       esac
       CC_RISK_5H_MIN=${CC_RISK_5H_MIN:-70}
       RISK_USAGE_CLI=${CC_USAGE_CLI:-/root/projects/tg_bots/mandrock0_cc_bot/usage-cli.js}
-      if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && [ -f "$RISK_USAGE_CLI" ]; then
+      UTIL5H=""
+      if [ "$CC_BACKEND" = "codex" ] && [ -x "$BIN/cc-codex-usage.sh" ]; then
+        UTIL5H=$(sh "$BIN/cc-codex-usage.sh" --tuple 2>/dev/null | cut -d' ' -f1)
+      elif command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && [ -f "$RISK_USAGE_CLI" ]; then
         UTIL5H=$(node "$RISK_USAGE_CLI" --ratelimit-json 2>/dev/null | jq -r '.util5h // empty' 2>/dev/null)
+      fi
+      if [ -n "$UTIL5H" ]; then
         case "$UTIL5H" in
           ''|*[!0-9.]*) : ;;
           *)

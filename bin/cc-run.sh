@@ -109,9 +109,17 @@ SESSARG=""; [ -n "$SESSID" ] && SESSARG="--session-id $SESSID"
 # не блокує спавн: снапшот, а не гейт.
 TASK_KIND=$(command -v cc_task_kind >/dev/null 2>&1 && cc_task_kind "$ID" || echo "${ID%%-*}")
 CONCURRENT_N=$(command -v cc_concurrent_others >/dev/null 2>&1 && cc_concurrent_others || echo "")
-UTIL_BEFORE=$(command -v cc_util_snapshot >/dev/null 2>&1 && cc_util_snapshot || echo "  ")
+backend_util_snapshot(){
+  if [ "$BACKEND" = "codex" ] && [ -x "$BIN/cc-codex-usage.sh" ]; then
+    sh "$BIN/cc-codex-usage.sh" --tuple 2>/dev/null || echo "  "
+  else
+    command -v cc_util_snapshot >/dev/null 2>&1 && cc_util_snapshot || echo "  "
+  fi
+}
+UTIL_BEFORE=$(backend_util_snapshot)
 UTIL5H_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f1)
 UTIL7D_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f2)
+UTILSRC_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f3)
 
 # --- Гард дорогої моделі (cc-opus-gate.sh) ---
 # ПЕРЕД спавном: opus без CC_OPUS_REASON не стартує. Ловиться до витрати
@@ -141,11 +149,11 @@ fail_reason(){
 # Пре-фліт оцінка перед спавном — у лог і в стартову нотифікацію (best-effort).
 ESTIMATE_SH="$BIN/cc-estimate.sh"
 if [ -f "$ESTIMATE_SH" ] && [ -n "$MODEL" ]; then
-  PREFLIGHT=$(sh "$ESTIMATE_SH" --task "$D/task.md" --model "$MODEL" --run-id "$ID" --kind "$TASK_KIND" 2>/dev/null)
+  PREFLIGHT=$(CC_EST_UTIL5H="$UTIL5H_BEFORE" CC_EST_UTIL7D="$UTIL7D_BEFORE" CC_EST_UTIL_SOURCE="$UTILSRC_BEFORE" sh "$ESTIMATE_SH" --task "$D/task.md" --model "$MODEL" --run-id "$ID" --kind "$TASK_KIND" --backend "$BACKEND" 2>/dev/null)
   if [ -n "$PREFLIGHT" ]; then
     echo "$PREFLIGHT" > "$D/preflight.log"
     # Telegram отримує компактний HTML-блок; повний PREFLIGHT (з VARS) лишається в preflight.log.
-    PF_HTML=$(sh "$ESTIMATE_SH" --task "$D/task.md" --model "$MODEL" --kind "$TASK_KIND" --compact-html 2>/dev/null)
+    PF_HTML=$(CC_EST_UTIL5H="$UTIL5H_BEFORE" CC_EST_UTIL7D="$UTIL7D_BEFORE" CC_EST_UTIL_SOURCE="$UTILSRC_BEFORE" sh "$ESTIMATE_SH" --task "$D/task.md" --model "$MODEL" --kind "$TASK_KIND" --backend "$BACKEND" --compact-html 2>/dev/null)
     if [ -n "$PF_HTML" ]; then
       notify_silent "<b>$TAG · старт</b>
 <code>$ID</code>
@@ -309,7 +317,7 @@ command -v cc_no_work_guard >/dev/null 2>&1 && cc_no_work_guard "$D" "$BACKEND" 
 
 # Estimator v2: util5h/7d ПІСЛЯ рану (best-effort) — передаються в
 # cc-telemetry.sh env-змінними разом з "до"-значеннями й concurrency.
-UTIL_AFTER=$(command -v cc_util_snapshot >/dev/null 2>&1 && cc_util_snapshot || echo "  ")
+UTIL_AFTER=$(backend_util_snapshot)
 UTIL5H_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f1)
 UTIL7D_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f2)
 
