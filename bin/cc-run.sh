@@ -34,19 +34,20 @@ export CC_RUNS
 # shellcheck source=cc-util-lib.sh
 [ -f "$BIN/cc-util-lib.sh" ] && . "$BIN/cc-util-lib.sh"
 
-# --- Тижневий лок (крон cc-week-guard.sh) ---
-# Присутній .week-locked -> тижневого бюджету менше порогу, cc-рани на вузлі
-# заглушено до скидання тижня. Дешева перевірка (без node/jq); знімає лок крон.
-WEEK_LOCK=${CC_WEEK_LOCK:-$CC_RUNS/.week-locked}
-if [ -f "$WEEK_LOCK" ]; then
-  echo "ВІДМОВА: тижневий лок активний ($WEEK_LOCK) — cc-рани заглушено до скидання тижня" >&2
-  exit 5
-fi
-
 D=${1:?run-dir}; D=${D%/}
 STYLE=${2:-none}
 MODEL=${3:-}
 BACKEND=${4:-claude}
+
+# --- Тижневий лок (крон cc-week-guard.sh) ---
+# Присутній .week-locked -> тижневого бюджету Claude менше порогу, claude-рани
+# на вузлі заглушено до скидання тижня. Лок міряє лише usage Claude: ран на
+# codex-бекенді його не перевіряє (відсічка за usage Codex — у BACKLOG.md).
+WEEK_LOCK=${CC_WEEK_LOCK:-$CC_RUNS/.week-locked}
+if [ "$BACKEND" != codex ] && [ -f "$WEEK_LOCK" ]; then
+  echo "ВІДМОВА: тижневий лок активний ($WEEK_LOCK) — cc-рани заглушено до скидання тижня" >&2
+  exit 5
+fi
 [ -f "$D/task.md" ] || { echo "cc-run: нема $D/task.md" >&2; exit 1; }
 
 # --- Гард повторного запуску в ту саму run-dir (mkdir атомарний) ---

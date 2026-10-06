@@ -57,15 +57,26 @@ chain_telemetry(){
     sh "$BIN/cc-telemetry.sh" "$1" "${2:-run}" >/dev/null 2>&1
 }
 
+CWD=${1:?cwd}; PLAN=${2:?plan}; TAG=${3:-chain}
+
 # --- Тижневий лок (крон cc-week-guard.sh) ---
-# Присутній .week-locked -> тижневого бюджету менше порогу, cc-рани на вузлі
-# заглушено до скидання тижня. Дешева перевірка (без node/jq); знімає лок крон.
+# Присутній .week-locked -> тижневого бюджету Claude менше порогу, claude-рани
+# на вузлі заглушено до скидання тижня. Лок міряє ЛИШЕ usage Claude, тому
+# ланцюг, де КОЖЕН крок йде на codex-бекенді (5-те поле рядка або CC_BACKEND),
+# його не перевіряє: codex-рани бюджет Claude не споживають. Достатньо одного
+# claude-кроку (або нечитабельного plan-файлу — fail-closed), щоб лок діяв.
+# Відсічка за usage Codex — у BACKLOG.md. Дешева перевірка (без node/jq).
 WEEK_LOCK=${CC_WEEK_LOCK:-$RUNS/.week-locked}
 if [ -f "$WEEK_LOCK" ]; then
-  echo "ВІДМОВА: тижневий лок активний ($WEEK_LOCK) — cc-рани заглушено до скидання тижня" >&2
-  exit 5
+  NEEDS_CLAUDE=1
+  if [ -r "$PLAN" ]; then
+    NEEDS_CLAUDE=$(awk -F'|' -v dflt="$CC_BACKEND" 'NF && $1 !~ /^[[:space:]]*#/ { b=$5; if (b=="") b=dflt; if (b!="codex") { print 1; exit } }' "$PLAN")
+  fi
+  if [ -n "$NEEDS_CLAUDE" ]; then
+    echo "ВІДМОВА: тижневий лок активний ($WEEK_LOCK) — cc-рани заглушено до скидання тижня" >&2
+    exit 5
+  fi
 fi
-CWD=${1:?cwd}; PLAN=${2:?plan}; TAG=${3:-chain}
 STAMP=$(date +%Y%m%d-%H%M)
 CHAIN=$RUNS/$TAG-$STAMP.log
 TOOLS=${CC_TOOLS:-"Bash Edit Write Read Glob Grep"}
