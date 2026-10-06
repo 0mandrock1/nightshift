@@ -66,16 +66,14 @@ CWD=${1:?cwd}; PLAN=${2:?plan}; TAG=${3:-chain}
 # його не перевіряє: codex-рани бюджет Claude не споживають. Достатньо одного
 # claude-кроку (або нечитабельного plan-файлу — fail-closed), щоб лок діяв.
 # Відсічка за usage Codex — у BACKLOG.md. Дешева перевірка (без node/jq).
+PLAN_HAS_CLAUDE=1
+if [ -r "$PLAN" ]; then
+  PLAN_HAS_CLAUDE=$(awk -F'|' -v dflt="$CC_BACKEND" 'NF && $1 !~ /^[[:space:]]*#/ { b=$5; if (b=="") b=dflt; if (b!="codex") { print 1; exit } }' "$PLAN")
+fi
 WEEK_LOCK=${CC_WEEK_LOCK:-$RUNS/.week-locked}
-if [ -f "$WEEK_LOCK" ]; then
-  NEEDS_CLAUDE=1
-  if [ -r "$PLAN" ]; then
-    NEEDS_CLAUDE=$(awk -F'|' -v dflt="$CC_BACKEND" 'NF && $1 !~ /^[[:space:]]*#/ { b=$5; if (b=="") b=dflt; if (b!="codex") { print 1; exit } }' "$PLAN")
-  fi
-  if [ -n "$NEEDS_CLAUDE" ]; then
-    echo "ВІДМОВА: тижневий лок активний ($WEEK_LOCK) — cc-рани заглушено до скидання тижня" >&2
-    exit 5
-  fi
+if [ -f "$WEEK_LOCK" ] && [ -n "$PLAN_HAS_CLAUDE" ]; then
+  echo "ВІДМОВА: тижневий лок активний ($WEEK_LOCK) — cc-рани заглушено до скидання тижня" >&2
+  exit 5
 fi
 STAMP=$(date +%Y%m%d-%H%M)
 CHAIN=$RUNS/$TAG-$STAMP.log
@@ -460,9 +458,11 @@ fi
 # Ланцюг ВІДМОВЛЯЄТЬСЯ стартувати, якщо тижня лишилось менше порогу —
 # структурна відсічка, яку не переговориш. Поріг CC_WEEK_MIN_LEFT (%, дефолт 5;
 # 0 = вимкнути). Число недоступне -> fail-open (backstop лишається exit 3).
+# Гейт міряє usage Claude, тож ланцюг без жодного claude-кроку його пропускає
+# (PLAN_HAS_CLAUDE порожній; відсічка за usage Codex — у BACKLOG.md).
 GATE_USAGE_CLI=${CC_USAGE_CLI:-/root/projects/tg_bots/mandrock0_cc_bot/usage-cli.js}
 WEEK_MIN_LEFT=${CC_WEEK_MIN_LEFT:-5}
-if [ "${WEEK_MIN_LEFT}" != 0 ] && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && [ -f "$GATE_USAGE_CLI" ]; then
+if [ "${WEEK_MIN_LEFT}" != 0 ] && [ -n "$PLAN_HAS_CLAUDE" ] && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && [ -f "$GATE_USAGE_CLI" ]; then
   U7=$(node "$GATE_USAGE_CLI" --ratelimit-json 2>/dev/null | jq -r '.util7d // empty' 2>/dev/null)
   case "$U7" in
     ''|*[!0-9.]*) log "гейт тижня: util7d недоступний — fail-open, старт дозволено" ;;
