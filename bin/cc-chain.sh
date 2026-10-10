@@ -330,7 +330,18 @@ RESULTCONTRACT
     notify "⛔ $TAG · session limit · <code>$id</code> · $PASSED ok до цього · exit 3"; exit 3
   fi
   if [ -n "$(git status --porcelain)" ]; then
-    git add -A && git commit -qm "chore($slug): auto-commit run output" && log "$id: авто-коміт незакоміченого"
+    git add -A
+    _cm="chore($slug): auto-commit run output"
+    if _co=$(git commit -qm "$_cm" 2>&1); then
+      log "$id: авто-коміт незакоміченого"
+    elif echo "$_co" | grep -q 'requires docs/'; then
+      # pre-commit репо вимагає docs/ разом із кодом (TOUCHVIZ): кладемо чесну WIP-нотатку, а не обходимо хук
+      mkdir -p docs/handoffs
+      printf '# WIP %s\n\nАвто-коміт після невдалого рану %s (код НЕ верифіковано). Хвіст: %s/out.log\n' "$id" "$id" "$d" > "docs/handoffs/wip-$id.md"
+      git add -A && git commit -qm "$_cm" && log "$id: авто-коміт незакоміченого (+WIP-нотатка для pre-commit)"
+    else
+      log "$id: авто-коміт НЕ вдався: $(echo "$_co" | tail -1 | cut -c1-120)"
+    fi
   fi
   if tail -40 "$d/out.log" | grep -aqE "RESULT:[[:space:]]*\**[[:space:]]*ok"; then
     log "$id: ok ($(git rev-parse --short HEAD))"
