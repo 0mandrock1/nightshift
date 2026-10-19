@@ -27,6 +27,7 @@ set -u
 [ -n "${CC_EXTRA_PATH:-}" ] && PATH="$CC_EXTRA_PATH:$PATH"
 export PATH
 CC_CLAUDE_BIN=${CC_CLAUDE_BIN:-claude}
+CC_CLAUDE_PERMISSION_MODE=${CC_CLAUDE_PERMISSION_MODE:-bypassPermissions}
 
 BIN=$(dirname "$(readlink -f "$0")")
 CC_RUNS=${CC_RUNS:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs}
@@ -168,13 +169,14 @@ fi
 if [ "$BACKEND" = "codex" ]; then
   # Codex CLI: немає --settings/outputStyle/--allowedTools, аромат уже
   # впаяний у task.md (той самий task.md, що й для claude). sandbox
-  # workspace-write — еквівалент acceptEdits; danger-full-access лише коли
-  # явно виставлений CC_CODEX_SANDBOX. --skip-git-repo-check — безкоштовно,
+  # Default: full host access without approval prompts (Mark, 2026-10-19).
+  # CC_CODEX_SANDBOX/CC_CODEX_APPROVAL_POLICY can restore stricter access. --skip-git-repo-check — безкоштовно,
   # коли CWD і так git-репо; рятує коли ні. --add-dir "$D" — run-dir лежить
   # поза CWD-репо (в $CC_RUNS): без цього codex не міг би писати туди
   # last-message.txt (docs/codex-cli.md підтверджує --add-dir у 0.156.1).
   CC_CODEX_BIN=${CC_CODEX_BIN:-codex}
-  CC_CODEX_SANDBOX=${CC_CODEX_SANDBOX:-workspace-write}
+  CC_CODEX_SANDBOX=${CC_CODEX_SANDBOX:-danger-full-access}
+  CC_CODEX_APPROVAL_POLICY=${CC_CODEX_APPROVAL_POLICY:-never}
   RUN_TIMEOUT_S=${CC_RUN_TIMEOUT_S:-2700}
 
   # --- Мапінг claude-стилю моделі -> codex slug, щоб plan-файли з
@@ -207,6 +209,7 @@ if [ "$BACKEND" = "codex" ]; then
 
   timeout "$RUN_TIMEOUT_S" "$CC_CODEX_BIN" exec -m "$CODEXMODEL" \
     -s "$CC_CODEX_SANDBOX" --skip-git-repo-check --add-dir "$D" \
+    -c "approval_policy=$CC_CODEX_APPROVAL_POLICY" \
     -c model_auto_compact_token_limit=270000 \
     -C "$PWD" --json -o "$D/last-message.txt" "$(cat "$D/task.md")" \
     < /dev/null > "$D/events.jsonl" 2> "$D/out.log"
@@ -225,8 +228,8 @@ if [ "$BACKEND" = "codex" ]; then
     echo "session limit" >> "$D/out.log"
   fi
 
-  # --- Автокоміт для codex (варіант (a), рішення Марка): codex під sandbox
-  # workspace-write НІКОЛИ не пише в .git (--add-dir .git заборонено — дало б
+  # --- Автокоміт для codex (варіант (a), рішення Марка): codex у strict mode
+  # workspace-write не пише в .git (--add-dir .git заборонено — дало б
   # агенту запис у .git/hooks, тобто виконання коду поза sandbox), тож коміт
   # незакомічених змін після успішного рану робить сама обгортка тут, у
   # батьківському процесі, ПОЗА sandbox codex. Лише коли RESULT: ok — при
@@ -274,11 +277,11 @@ elif [ "$STYLE" = "none" ]; then
   # очікування видимим (один рядок у out.log), але сам по собі не обмежує
   # його в часі (як у cc-chain.sh).
   RUN_TIMEOUT_S=${CC_RUN_TIMEOUT_S:-2700}
-  timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$D/task.md")" $MODELARG $SESSARG --permission-mode acceptEdits \
+  timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$D/task.md")" $MODELARG $SESSARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" \
     --allowedTools "$TOOLS" < /dev/null > "$D/out.log" 2>&1
 else
   RUN_TIMEOUT_S=${CC_RUN_TIMEOUT_S:-2700}
-  timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$D/task.md")" $MODELARG $SESSARG --permission-mode acceptEdits \
+  timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$D/task.md")" $MODELARG $SESSARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" \
     --allowedTools "$TOOLS" --settings "{\"outputStyle\":\"$STYLE\"}" < /dev/null > "$D/out.log" 2>&1
 fi
 RC=$?

@@ -270,3 +270,10 @@ sha для «ok (sha)» і продовження гілки береться о
 рядок логу `"$id: ok ($(git rev-parse --short HEAD))"`. Перевірено
 `tests/test-chain-codex.sh` (два послідовні codex-рани продовжують гілку
 одне одного, sha з логу == HEAD після кожного кроку).
+
+## Permission defaults since 2026-10-19
+
+The workspace-write smoke tests above describe the historical restricted mode.
+Headless drivers now default to danger-full-access and approval_policy=never
+(owner request). Restricted runs can still set CC_CODEX_SANDBOX=workspace-write.
+See [the permission protocol](unattended-permissions.md) for scope and overrides.

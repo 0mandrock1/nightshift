@@ -84,7 +84,7 @@ same `task.md` contract. Notable differences, documented in
 - Claude-style model names (`opus`/`sonnet`/`haiku`) are mapped to Codex
   slugs (`gpt-6-sol`/`gpt-6-luna`/`gpt-6-luna`); `gpt-*` passes through
   as-is.
-- Codex's `workspace-write` sandbox never gets write access to `.git`
+- An explicitly selected Codex `workspace-write` sandbox never gets write access to `.git`
   (`--add-dir .git` is deliberately forbidden — it would also grant write
   access to `.git/hooks/`, letting a hook execute code outside the sandbox).
   So the wrapper itself, in the parent process, commits any dirty tree after
@@ -124,7 +124,9 @@ same `task.md` contract. Notable differences, documented in
 | `CC_OPUS_REASON` | (unset) | required, non-empty, to spawn an Opus-tier model |
 | `CC_BACKEND` | `claude` | `claude`\|`codex`, default backend for plan lines without their own field |
 | `CC_CODEX_BIN` | `codex` | Codex CLI binary |
-| `CC_CODEX_SANDBOX` | `workspace-write` | `codex exec -s` |
+| `CC_CODEX_SANDBOX` | `danger-full-access` | `codex exec -s`; set `workspace-write` for a restricted run |
+| `CC_CODEX_APPROVAL_POLICY` | `never` | Codex approval policy for unattended runs |
+| `CC_CLAUDE_PERMISSION_MODE` | `bypassPermissions` | Claude permission mode; set `acceptEdits` for a restricted run |
 | `MAXPAR` | `4` (swarm) | concurrency ceiling for lanes |
 | `LANE_TIMEOUT` | `1800` | per-lane timeout (swarm); lane gets status `timeout`, does not block the rest |
 | `DRYRUN` | `0` | validation/worktree/manifest only, no real spawn |
@@ -253,3 +255,18 @@ credentials) — none touch production state or the production database.
 ## License
 
 MIT.
+
+## Unattended permissions (2026-10-19)
+
+At the owner's request, both run and chain drivers default to full host
+access: Codex `danger-full-access` with `approval_policy=never`, Claude
+`bypassPermissions`. Swarm lanes inherit these defaults through cc-run.sh.
+This changes driver invocations, not global interactive CLI settings.
+Task scope, secrets policy, duplicate locks, budget/model gates, timeouts
+and result verification still apply. Restricted runs can override the three
+environment variables above. Agents with full access can commit before
+deploy; wrapper auto-commit remains a fallback for uncommitted work.
+
+The no-work check uses only the active backend's usage source: Codex
+`events.jsonl`, Claude `usage.json`. A previous Claude attempt's zero usage
+cannot override completed Codex work. Unknown usage remains unknown.

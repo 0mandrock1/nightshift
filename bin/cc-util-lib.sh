@@ -61,14 +61,16 @@ cc_task_kind(){
 cc_out_tokens(){
   DIR=${1:?run-dir}; BACKEND=${2:-claude}
   OUT=""
-  if [ -f "$DIR/usage.json" ] && command -v jq >/dev/null 2>&1; then
-    OUT=$(jq -r '.total_out // empty' "$DIR/usage.json" 2>/dev/null || echo "")
+  if command -v jq >/dev/null 2>&1; then
+    if [ "$BACKEND" = "codex" ]; then
+      if [ -f "$DIR/events.jsonl" ]; then
+        OUT=$(jq -rs '[.[] | select(.type=="turn.completed") | .usage.output_tokens // 0] | if length==0 then empty else add end' "$DIR/events.jsonl" 2>/dev/null || echo "")
+      fi
+    elif [ -f "$DIR/usage.json" ]; then
+      OUT=$(jq -r '.total_out // empty' "$DIR/usage.json" 2>/dev/null || echo "")
+    fi
   fi
   case "$OUT" in *[!0-9]*) OUT="" ;; esac
-  if [ -z "$OUT" ] && [ "$BACKEND" = "codex" ] && [ -f "$DIR/events.jsonl" ] && command -v jq >/dev/null 2>&1; then
-    OUT=$(jq -rs '[.[] | select(.type=="turn.completed") | .usage.output_tokens // 0] | if length==0 then empty else add end' "$DIR/events.jsonl" 2>/dev/null || echo "")
-    case "$OUT" in *[!0-9]*) OUT="" ;; esac
-  fi
   echo "$OUT"
 }
 

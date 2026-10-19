@@ -24,7 +24,7 @@
 #               що й у cc-run.sh, без делегування туди — ланцюг сам робить
 #               git checkout/auto-commit навколо спавну)
 #      CC_CODEX_BIN  (дефолт codex) — бінарник Codex CLI
-#      CC_CODEX_SANDBOX  (дефолт workspace-write) — codex -s
+#      CC_CODEX_SANDBOX  (дефолт danger-full-access) — codex -s
 #      CC_EXTRA_PATH  (дефолт порожньо) — префікс до PATH ПЕРЕД спавном claude
 #               (на вузлах, де claude стоїть поза PATH неінтерактивного sh)
 #
@@ -34,6 +34,7 @@ set -u
 [ -n "${CC_EXTRA_PATH:-}" ] && PATH="$CC_EXTRA_PATH:$PATH"
 export PATH
 CC_CLAUDE_BIN=${CC_CLAUDE_BIN:-claude}
+CC_CLAUDE_PERMISSION_MODE=${CC_CLAUDE_PERMISSION_MODE:-bypassPermissions}
 CC_BACKEND=${CC_BACKEND:-claude}
 
 BIN=$(dirname "$(readlink -f "$0")")
@@ -284,9 +285,11 @@ RESULTCONTRACT
     # (last-message.txt), не в stdout — дописуємо в кінець out.log, щоб
     # RESULT/NOTES-парсинг нижче (спільний з claude-гілкою) працював без змін.
     CC_CODEX_BIN=${CC_CODEX_BIN:-codex}
-    CC_CODEX_SANDBOX=${CC_CODEX_SANDBOX:-workspace-write}
+    CC_CODEX_SANDBOX=${CC_CODEX_SANDBOX:-danger-full-access}
+    CC_CODEX_APPROVAL_POLICY=${CC_CODEX_APPROVAL_POLICY:-never}
     timeout "$RUN_TIMEOUT_S" "$CC_CODEX_BIN" exec -m "$CODEXMODEL" \
       -s "$CC_CODEX_SANDBOX" --skip-git-repo-check --add-dir "$d" \
+      -c "approval_policy=$CC_CODEX_APPROVAL_POLICY" \
       -c model_auto_compact_token_limit=270000 \
       -C "$CWD" --json -o "$d/last-message.txt" "$(cat "$d/task.md")" \
       < /dev/null > "$d/events.jsonl" 2> "$d/out.log"
@@ -303,10 +306,10 @@ RESULTCONTRACT
       echo "session limit" >> "$d/out.log"
     fi
   elif [ "$style" = "none" ]; then
-    timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat $d/task.md)" $MODELARG --permission-mode acceptEdits --allowedTools "$TOOLS" < /dev/null > "$d/out.log" 2>&1
+    timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat $d/task.md)" $MODELARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" --allowedTools "$TOOLS" < /dev/null > "$d/out.log" 2>&1
     CLAUDE_EXIT=$?
   else
-    timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat $d/task.md)" $MODELARG --permission-mode acceptEdits --allowedTools "$TOOLS" --settings "{\"outputStyle\":\"$style\"}" < /dev/null > "$d/out.log" 2>&1
+    timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat $d/task.md)" $MODELARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" --allowedTools "$TOOLS" --settings "{\"outputStyle\":\"$style\"}" < /dev/null > "$d/out.log" 2>&1
     CLAUDE_EXIT=$?
   fi
   [ "$CLAUDE_EXIT" = 124 ] && log "$id: TIMEOUT — вбито по ${RUN_TIMEOUT_S}s, перевіряю чи є реальна робота нижче"
