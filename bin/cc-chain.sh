@@ -35,6 +35,8 @@ set -u
 export PATH
 CC_CLAUDE_BIN=${CC_CLAUDE_BIN:-claude}
 CC_CLAUDE_PERMISSION_MODE=${CC_CLAUDE_PERMISSION_MODE:-bypassPermissions}
+# root-вузол (виділений агентний VPS): без цього Claude CLI відхиляє bypassPermissions під root
+export IS_SANDBOX=${IS_SANDBOX:-1}
 CC_BACKEND=${CC_BACKEND:-claude}
 
 BIN=$(dirname "$(readlink -f "$0")")

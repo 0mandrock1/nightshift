@@ -43,3 +43,7 @@ Regression tests:
 
 CLI flags checked against the installed codex help. Official documentation:
 https://learn.chatgpt.com/docs/security
+
+## Root nodes (2026-11-03)
+
+Claude CLI rejects bypassPermissions under root. The VPS is a dedicated agent/learning node, so drivers export IS_SANDBOX=1 by default (override: IS_SANDBOX=0 with CC_CLAUDE_PERMISSION_MODE=acceptEdits). All Claude runs failed at start from ea85915 until this fix.
