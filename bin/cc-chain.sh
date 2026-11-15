@@ -290,6 +290,7 @@ RESULTCONTRACT
     CC_CODEX_SANDBOX=${CC_CODEX_SANDBOX:-danger-full-access}
     CC_CODEX_APPROVAL_POLICY=${CC_CODEX_APPROVAL_POLICY:-never}
     timeout "$RUN_TIMEOUT_S" "$CC_CODEX_BIN" exec -m "$CODEXMODEL" \
+      ${CC_CODEX_EFFORT:+-c model_reasoning_effort=$CC_CODEX_EFFORT} \
       -s "$CC_CODEX_SANDBOX" --skip-git-repo-check --add-dir "$d" \
       -c "approval_policy=$CC_CODEX_APPROVAL_POLICY" \
       -c model_auto_compact_token_limit=270000 \
