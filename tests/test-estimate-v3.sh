@@ -84,5 +84,9 @@ after = q | {"observed_at": now + 1, "windows": {"5h": w | {"used_percent": 22},
 assert module.quota_delta(q, after)["5h"]["percentage_points"] == 2
 assert module.quota_delta(q, after)["7d"]["reason"] == "window_changed_or_unknown"
 assert module.quota_delta(q, q)["5h"]["reason"] == "same_or_older_snapshot"
+jitter = q | {"observed_at": now + 1, "windows": {"5h": w | {"reset_at": 1201}, "7d": w}}
+assert module.quota_delta(q, jitter)["5h"]["window_match"] == "codex_reset_jitter_1s"
+assert module.quota_delta(q, jitter | {"observed_at": 1200})["5h"]["reason"] == "window_changed_or_unknown"
+assert module.quota_delta(q | {"backend": "claude"}, jitter | {"backend": "claude"})["5h"]["reason"] == "window_changed_or_unknown"
 PY
 echo 'OK: native provider guard, partial windows, alias mapping, deduplication and chronological replay'

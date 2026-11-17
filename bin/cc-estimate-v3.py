@@ -290,12 +290,18 @@ def quota_delta(before, after):
             a, b = before["windows"][key], after["windows"][key]
             if not a["usable"] or not b["usable"]:
                 reason = "window_unavailable"
-            elif a["reset_at"] is None or a["reset_at"] != b["reset_at"]:
+            elif a["reset_at"] is None or b["reset_at"] is None:
+                reason = "window_changed_or_unknown"
+            elif a["reset_at"] != b["reset_at"] and not (
+                before["backend"] == "codex" and abs(a["reset_at"] - b["reset_at"]) <= 1
+                and min(a["reset_at"], b["reset_at"]) > after["observed_at"]
+            ):
                 reason = "window_changed_or_unknown"
             elif b["used_percent"] < a["used_percent"]:
                 reason = "decreased"
             else:
-                results[key] = {"status": "account_delta", "attribution": "unknown",
+                match = "equal_reset" if a["reset_at"] == b["reset_at"] else "codex_reset_jitter_1s"
+                results[key] = {"status": "account_delta", "attribution": "unknown", "window_match": match,
                                 "percentage_points": round(b["used_percent"] - a["used_percent"], 2)}
                 continue
         results[key] = {"status": "unavailable", "reason": reason}
