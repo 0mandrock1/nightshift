@@ -48,16 +48,20 @@ export CC_RUNS
 RUNS=$CC_RUNS
 # shellcheck source=cc-util-lib.sh
 [ -f "$BIN/cc-util-lib.sh" ] && . "$BIN/cc-util-lib.sh"
+. "$BIN/cc-estimate-v3-lib.sh"
 
 # Обгортка cc-telemetry.sh, що прокидає estimator-v2 змінні (UTIL5H_BEFORE/
 # CONCURRENT_N/TASK_KIND виставляє do_run() ДО спавну, UTIL5H_AFTER — ПІСЛЯ,
 # усі як глобальні змінні процесу; окремих аргументів не потребує).
 chain_telemetry(){
+  CC_TELEMETRY_KIND=chain_step CC_ESTIMATE_PLAN_ID="$(basename "$CHAIN" .log)" \
+    cc_v3_finish "$1" "$2" "$CLAUDE_EXIT"
   [ -f "$BIN/cc-telemetry.sh" ] || return 0
   CC_UTIL5H_BEFORE="${UTIL5H_BEFORE:-}" CC_UTIL5H_AFTER="${UTIL5H_AFTER:-}" \
   CC_UTIL7D_BEFORE="${UTIL7D_BEFORE:-}" CC_UTIL7D_AFTER="${UTIL7D_AFTER:-}" \
   CC_CONCURRENT="${CONCURRENT_N:-}" CC_TASK_KIND="${TASK_KIND:-}" \
-    sh "$BIN/cc-telemetry.sh" "$1" "${2:-run}" >/dev/null 2>&1
+  CC_TELEMETRY_BACKEND="$backend" CC_TELEMETRY_MODEL="$CODEXMODEL" \
+    sh "$BIN/cc-telemetry.sh" "$1" run >/dev/null 2>&1
 }
 
 CWD=${1:?cwd}; PLAN=${2:?plan}; TAG=${3:-chain}
@@ -209,24 +213,16 @@ fail_reason(){
 do_run(){
   slug=$1; style=$2; task=$3; model=${4:-}; backend_raw=${5:-}
   backend=$backend_raw; [ -n "$backend" ] || backend=$CC_BACKEND
+  CODEXMODEL=""
   case "$backend" in
     claude|codex) : ;;
     *) log "$slug: невідомий backend '$backend' (очікую claude|codex) — ланцюг спинено"; exit 1 ;;
   esac
   if [ "$backend" = codex ]; then
-    # Мапінг claude-стилю моделі -> codex slug (той самий, що cc-run.sh), щоб
-    # plan-рядки з opus/sonnet/haiku відпрацьовували без правок на codex.
-    case "$model" in
-      "")     CODEXMODEL=gpt-6-luna ;;
-      opus)   CODEXMODEL=gpt-6-sol ;;
-      sonnet) CODEXMODEL=gpt-6-luna ;;
-      haiku)  CODEXMODEL=gpt-6-luna ;;
-      gpt-*)  CODEXMODEL=$model ;;
-      *)
-        log "$slug: невідома модель для codex-бекенда: '$model' (очікую opus|sonnet|haiku|порожньо|gpt-*) — ланцюг спинено"
-        exit 2
-        ;;
-    esac
+    CODEXMODEL=$(cc_resolve_model "$backend" "$model") || {
+      log "$slug: невідома модель Codex '$model'"
+      exit 2
+    }
     case "$CODEXMODEL" in
       gpt-6-sol|gpt-6-astra) GATEMODEL=opus ;;
       *) GATEMODEL=$model ;;
@@ -262,9 +258,34 @@ RESULTCONTRACT
   # cc-run.sh, спільна функція з cc-util-lib.sh.
   TASK_KIND=$(command -v cc_task_kind >/dev/null 2>&1 && cc_task_kind "$id" || echo "${id%%-*}")
   CONCURRENT_N=$(command -v cc_concurrent_others >/dev/null 2>&1 && cc_concurrent_others || echo "")
-  UTIL_BEFORE=$(command -v cc_util_snapshot >/dev/null 2>&1 && cc_util_snapshot || echo "  ")
-  UTIL5H_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f1)
-  UTIL7D_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f2)
+  UTIL5H_BEFORE=""; UTIL7D_BEFORE=""
+  if cc_v3_begin "$d" "$backend" "$model" "$id"; then
+    STEP_PREFLIGHT=$(cc_v3_render "$V3_PATH")
+    printf '%s\n' "$STEP_PREFLIGHT" > "$d/preflight.log"
+    log "$id: $STEP_PREFLIGHT"
+    if STOP_CODE=$(cc_v3_stop_code); then
+      CLAUDE_EXIT=$STOP_CODE
+      OUTCOME=deferred
+      [ "$STOP_CODE" != 8 ] || OUTCOME=blocked
+      echo "$STOP_CODE" > "$d/exit_code"
+      chain_telemetry "$d" "$OUTCOME"
+      notify "⛔ $TAG · запуск призупинено · <code>$id</code>
+$STEP_PREFLIGHT"
+      exit "$STOP_CODE"
+    fi
+    notify_silent "<b>$TAG · крок</b> · <code>$id</code>
+$STEP_PREFLIGHT"
+  elif [ "$backend" = claude ]; then
+    UTIL_BEFORE=$(cc_util_snapshot)
+    UTIL5H_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f1)
+    UTIL7D_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f2)
+  fi
+  SESSARG=""
+  if [ "$backend" = claude ] && [ -n "$V3_PATH" ]; then
+    SESSID=$(cat /proc/sys/kernel/random/uuid)
+    printf '%s\n' "$SESSID" > "$d/session_id"
+    SESSARG="--session-id $SESSID"
+  fi
   log "$id старт (backend=$backend, style=$style, base=$(cut -c1-7 < $d/base_sha))"
   # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0: без цього headless-сесія може
   # вийти по стелі очікування фонової задачі (Task/background bash),
@@ -289,6 +310,7 @@ RESULTCONTRACT
     CC_CODEX_BIN=${CC_CODEX_BIN:-codex}
     CC_CODEX_SANDBOX=${CC_CODEX_SANDBOX:-danger-full-access}
     CC_CODEX_APPROVAL_POLICY=${CC_CODEX_APPROVAL_POLICY:-never}
+    cc_v3_clock start
     timeout "$RUN_TIMEOUT_S" "$CC_CODEX_BIN" exec -m "$CODEXMODEL" \
       ${CC_CODEX_EFFORT:+-c model_reasoning_effort=$CC_CODEX_EFFORT} \
       -s "$CC_CODEX_SANDBOX" --skip-git-repo-check --add-dir "$d" \
@@ -297,6 +319,7 @@ RESULTCONTRACT
       -C "$CWD" --json -o "$d/last-message.txt" "$(cat "$d/task.md")" \
       < /dev/null > "$d/events.jsonl" 2> "$d/out.log"
     CLAUDE_EXIT=$?
+    cc_v3_clock end
     [ -f "$d/last-message.txt" ] && cat "$d/last-message.txt" >> "$d/out.log"
     # turn.failed / квота / rate-limit в events.jsonl -> той самий шлях
     # "session limit" нижче, що вже ловить claude-гілку (exit 3).
@@ -309,15 +332,21 @@ RESULTCONTRACT
       echo "session limit" >> "$d/out.log"
     fi
   elif [ "$style" = "none" ]; then
-    timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat $d/task.md)" $MODELARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" --allowedTools "$TOOLS" < /dev/null > "$d/out.log" 2>&1
+    cc_v3_clock start
+    timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$d/task.md")" $MODELARG $SESSARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" --allowedTools "$TOOLS" < /dev/null > "$d/out.log" 2>&1
     CLAUDE_EXIT=$?
+    cc_v3_clock end
   else
-    timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat $d/task.md)" $MODELARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" --allowedTools "$TOOLS" --settings "{\"outputStyle\":\"$style\"}" < /dev/null > "$d/out.log" 2>&1
+    cc_v3_clock start
+    timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$d/task.md")" $MODELARG $SESSARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" --allowedTools "$TOOLS" --settings "{\"outputStyle\":\"$style\"}" < /dev/null > "$d/out.log" 2>&1
     CLAUDE_EXIT=$?
+    cc_v3_clock end
   fi
   [ "$CLAUDE_EXIT" = 124 ] && log "$id: TIMEOUT — вбито по ${RUN_TIMEOUT_S}s, перевіряю чи є реальна робота нижче"
-  log "$(sh "$BIN/run-usage.sh" "$d" 2>&1 | tail -1)"
-  [ -f "$BIN/cc-cost.sh" ] && log "$(sh "$BIN/cc-cost.sh" "$d" 2>/dev/null | tail -1)"
+  if [ "$backend" = claude ]; then
+    log "$(sh "$BIN/run-usage.sh" "$d" 2>&1 | tail -1)"
+    [ -f "$BIN/cc-cost.sh" ] && log "$(sh "$BIN/cc-cost.sh" "$d" 2>/dev/null | tail -1)"
+  fi
   # Гард «нуль роботи» (estimator v2, 27.09): RESULT: ok з <300 out-токенів
   # або без непорожнього CHANGED: — переписує хвіст out.log на RESULT: fail
   # ДО перевірки нижче, тому ok/fail-гілка сама бачить оновлений стан. Не
@@ -326,13 +355,16 @@ RESULTCONTRACT
   # Estimator v2: util5h/7d ПІСЛЯ рану — до telemetry, разом з "до"-значеннями.
   # Рахується ОДИН раз тут (до session-limit гілки), щоб той самий знімок
   # ішов у telemetry незалежно від того, якою гілкою вийде цей крок.
-  UTIL_AFTER=$(command -v cc_util_snapshot >/dev/null 2>&1 && cc_util_snapshot || echo "  ")
-  UTIL5H_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f1)
-  UTIL7D_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f2)
-  if grep -aq "session limit" "$d/out.log"; then
+  UTIL5H_AFTER=""; UTIL7D_AFTER=""
+  if [ -z "$V3_PATH" ] && [ "$backend" = claude ]; then
+    UTIL_AFTER=$(cc_util_snapshot)
+    UTIL5H_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f1)
+    UTIL7D_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f2)
+  fi
+  if [ "$CLAUDE_EXIT" != 124 ] && grep -aq "session limit" "$d/out.log"; then
     log "$id: SESSION LIMIT — ланцюг спинено, це не провал задачі"
     echo 3 > "$d/exit_code"
-    chain_telemetry "$d" run
+    chain_telemetry "$d" quota
     notify "⛔ $TAG · session limit · <code>$id</code> · $PASSED ok до цього · exit 3"; exit 3
   fi
   if [ -n "$(git status --porcelain)" ]; then
@@ -349,10 +381,17 @@ RESULTCONTRACT
       log "$id: авто-коміт НЕ вдався: $(echo "$_co" | tail -1 | cut -c1-120)"
     fi
   fi
+  if [ "$CLAUDE_EXIT" = 124 ]; then
+    echo TIMEOUT > "$d/fail_reason"
+    echo 124 > "$d/exit_code"
+    chain_telemetry "$d" timeout
+    notify "⏱️ $TAG · timeout · <code>$id</code> · ліміт ${RUN_TIMEOUT_S}s"
+    exit 2
+  fi
   if tail -40 "$d/out.log" | grep -aqE "RESULT:[[:space:]]*\**[[:space:]]*ok"; then
     log "$id: ok ($(git rev-parse --short HEAD))"
     echo 0 > "$d/exit_code"
-    chain_telemetry "$d" run
+    chain_telemetry "$d" ok
     PASSED=$((PASSED+1)); notify "✅ $TAG · run ok · <code>$(git rev-parse --short HEAD)</code> · пройдено $PASSED"
   else
     if [ "$CLAUDE_EXIT" = 0 ]; then
@@ -368,7 +407,7 @@ RESULTCONTRACT
       fi
       log "$id: AMBIGUOUS — claude завершився чисто, $RMSG — ланцюг спинено для ручної перевірки, гілка лишена"
       echo 4 > "$d/exit_code"
-      chain_telemetry "$d" run
+      chain_telemetry "$d" ambiguous
       notify "⚠️ $TAG · ambiguous · <code>$id</code> · $PASSED ok до цього · exit 4 · $RMSG, перевір вручну · гілку лишено"; exit 4
     fi
     R=OK-FAIL
@@ -377,14 +416,30 @@ RESULTCONTRACT
     echo "$R" > "$d/fail_reason"
     log "$id: FAIL [$R] — ланцюг спинено, гілка лишена як є для розбору"
     echo 2 > "$d/exit_code"
-    chain_telemetry "$d" run
+    chain_telemetry "$d" fail
     notify "❌ $TAG · run fail [$R] · <code>$id</code> · $PASSED ok до цього · exit 2 · гілку лишено"; exit 2
   fi
 }
 
 log "ланцюг стартував від $(git -C "$CWD" rev-parse --abbrev-ref HEAD)"
-# Пре-фліт оцінка по першому кроку плану — грубий проксі на весь ланцюг (best-effort).
-if [ -f "$BIN/cc-estimate.sh" ]; then
+PLAN_HAS_CODEX=$(awk -F'|' -v dflt="$CC_BACKEND" '
+  NF && $1 !~ /^[[:space:]]*#/ { b=$5; if (b=="") b=dflt; if (b=="codex") { print 1; exit } }
+' "$PLAN")
+PLAN_V3=""
+if { [ -n "$PLAN_HAS_CODEX" ] && cc_v3_enabled codex; } || cc_v3_enabled claude; then
+  CLAUDE_QUOTA=""
+  cc_v3_enabled claude && CLAUDE_QUOTA=--claude-quota
+  if python3 "$BIN/cc-estimate-v3.py" predict --mode chain --plan "$PLAN" --backend "$CC_BACKEND" \
+      "--effort=${CC_CODEX_EFFORT:-}" $CLAUDE_QUOTA --output "$CHAIN.preflight-v3.json" >/dev/null; then
+    PLAN_V3="$CHAIN.preflight-v3.json"
+    PF_HTML=$(cc_v3_render "$PLAN_V3")
+    log "$PF_HTML"
+    notify_silent "<b>$TAG · старт ланцюга</b>
+$PF_HTML"
+  fi
+fi
+# Старий формат для checkout-ів із вимкненим v3.
+if [ -z "$PLAN_V3" ] && [ -f "$BIN/cc-estimate.sh" ]; then
   FIRST_LINE=$(grep -vE '^#|^$' "$PLAN" | head -1)
   FIRST_SLUG=$(echo "$FIRST_LINE" | cut -d'|' -f1)
   FIRST_TASK=$(echo "$FIRST_LINE" | cut -d'|' -f3)

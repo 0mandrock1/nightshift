@@ -36,6 +36,7 @@ CC_RUNS=${CC_RUNS:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs}
 export CC_RUNS
 # shellcheck source=cc-util-lib.sh
 [ -f "$BIN/cc-util-lib.sh" ] && . "$BIN/cc-util-lib.sh"
+. "$BIN/cc-estimate-v3-lib.sh"
 
 D=${1:?run-dir}; D=${D%/}
 STYLE=${2:-none}
@@ -120,16 +121,22 @@ backend_util_snapshot(){
     command -v cc_util_snapshot >/dev/null 2>&1 && cc_util_snapshot || echo "  "
   fi
 }
-UTIL_BEFORE=$(backend_util_snapshot)
-UTIL5H_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f1)
-UTIL7D_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f2)
-UTILSRC_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f3)
+CODEXMODEL=""
+if [ "$BACKEND" = codex ]; then
+  CODEXMODEL=$(cc_resolve_model "$BACKEND" "$MODEL") || {
+    printf 'cc-run: невідома модель Codex %s\n' "$MODEL" >&2
+    echo 2 > "$D/exit_code"
+    exit 2
+  }
+fi
 
 # --- Гард дорогої моделі (cc-opus-gate.sh) ---
 # ПЕРЕД спавном: opus без CC_OPUS_REASON не стартує. Ловиться до витрати
 # токенів, тому відмова безкоштовна. Код виходу 6 прокидається наверх.
 if [ -f "$BIN/cc-opus-gate.sh" ]; then
-  sh "$BIN/cc-opus-gate.sh" "$MODEL" "$ID" || exit $?
+  GATEMODEL=$MODEL
+  case "$CODEXMODEL" in gpt-6-sol|gpt-6-astra) GATEMODEL=opus ;; esac
+  sh "$BIN/cc-opus-gate.sh" "$GATEMODEL" "$ID" || exit $?
 fi
 
 # Best-effort: нотифікація ніколи не валить ран і не чіпає код виходу.
@@ -152,7 +159,29 @@ fail_reason(){
 
 # Пре-фліт оцінка перед спавном — у лог і в стартову нотифікацію (best-effort).
 ESTIMATE_SH="$BIN/cc-estimate.sh"
-if [ -f "$ESTIMATE_SH" ] && [ -n "$MODEL" ]; then
+UTIL5H_BEFORE=""; UTIL7D_BEFORE=""; UTILSRC_BEFORE=""
+if cc_v3_begin "$D" "$BACKEND" "$MODEL" "$ID"; then
+  PF_HTML=$(cc_v3_render "$V3_PATH")
+  printf '%s\n' "$PF_HTML" > "$D/preflight.log"
+  if STOP_CODE=$(cc_v3_stop_code); then
+    OUTCOME=deferred
+    [ "$STOP_CODE" != 8 ] || OUTCOME=blocked
+    cc_v3_finish "$D" "$OUTCOME" "$STOP_CODE"
+    echo "$STOP_CODE" > "$D/exit_code"
+    notify "⛔ $TAG · запуск призупинено · <code>$ID</code>
+$PF_HTML"
+    exit "$STOP_CODE"
+  fi
+  notify_silent "<b>$TAG · старт</b>
+<code>$ID</code>
+$PF_HTML"
+else
+  UTIL_BEFORE=$(backend_util_snapshot)
+  UTIL5H_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f1)
+  UTIL7D_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f2)
+  UTILSRC_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f3)
+fi
+if [ -z "$V3_PATH" ] && [ -f "$ESTIMATE_SH" ] && [ -n "$MODEL" ]; then
   PREFLIGHT=$(CC_EST_UTIL5H="$UTIL5H_BEFORE" CC_EST_UTIL7D="$UTIL7D_BEFORE" CC_EST_UTIL_SOURCE="$UTILSRC_BEFORE" sh "$ESTIMATE_SH" --task "$D/task.md" --model "$MODEL" --run-id "$ID" --kind "$TASK_KIND" --backend "$BACKEND" 2>/dev/null)
   if [ -n "$PREFLIGHT" ]; then
     echo "$PREFLIGHT" > "$D/preflight.log"
@@ -181,46 +210,25 @@ if [ "$BACKEND" = "codex" ]; then
   CC_CODEX_APPROVAL_POLICY=${CC_CODEX_APPROVAL_POLICY:-never}
   RUN_TIMEOUT_S=${CC_RUN_TIMEOUT_S:-2700}
 
-  # --- Мапінг claude-стилю моделі -> codex slug, щоб plan-файли з
-  # claude-моделями (opus/sonnet/haiku) відпрацьовували без правок при
-  # фейловері claude -> codex. Будь-що з префіксом gpt- проходить як є. ---
-  case "$MODEL" in
-    "")     CODEXMODEL=gpt-6-luna ;;
-    opus)   CODEXMODEL=gpt-6-sol ;;
-    sonnet) CODEXMODEL=gpt-6-luna ;;
-    haiku)  CODEXMODEL=gpt-6-luna ;;
-    gpt-*)  CODEXMODEL=$MODEL ;;
-    *)
-      echo "cc-run: невідома модель для codex-бекенда: '$MODEL' (очікую opus|sonnet|haiku|порожньо|gpt-*)" >&2
-      echo 2 > "$D/exit_code"
-      notify "❌ $TAG · fail · <code>$ID</code> · exit 2 · невідома модель codex: $MODEL"
-      exit 2
-      ;;
-  esac
-
-  # --- Гард дорогої моделі: gpt-6-sol/gpt-6-astra ~ opus. cc-opus-gate.sh сам
-  # ловить лише підрядок "opus" у MODEL — мапимо явно, щоб gpt-6-sol/astra
-  # без CC_OPUS_REASON так само впирались у відмову (exit 6). ---
-  case "$CODEXMODEL" in
-    gpt-6-sol|gpt-6-astra) GATEMODEL=opus ;;
-    *) GATEMODEL=$MODEL ;;
-  esac
-  if [ -f "$BIN/cc-opus-gate.sh" ]; then
-    sh "$BIN/cc-opus-gate.sh" "$GATEMODEL" "$ID" || exit $?
-  fi
-
+  CODEX_LAST="$D/.last-message.$$"
+  cc_v3_clock start
   timeout "$RUN_TIMEOUT_S" "$CC_CODEX_BIN" exec -m "$CODEXMODEL" \
+    ${CC_CODEX_EFFORT:+-c model_reasoning_effort=$CC_CODEX_EFFORT} \
     -s "$CC_CODEX_SANDBOX" --skip-git-repo-check --add-dir "$D" \
     -c "approval_policy=$CC_CODEX_APPROVAL_POLICY" \
     -c model_auto_compact_token_limit=270000 \
-    -C "$PWD" --json -o "$D/last-message.txt" "$(cat "$D/task.md")" \
+    -C "$PWD" --json -o "$CODEX_LAST" "$(cat "$D/task.md")" \
     < /dev/null > "$D/events.jsonl" 2> "$D/out.log"
   RC=$?
+  cc_v3_clock end
 
   # RESULT-контракт codex пише у -o файл (last-message.txt), не в stdout —
   # дописуємо в кінець out.log, щоб RESULT/NOTES-парсинг і нотифікація нижче
   # працювали для обох бекендів без змін.
-  [ -f "$D/last-message.txt" ] && cat "$D/last-message.txt" >> "$D/out.log"
+  if [ -f "$CODEX_LAST" ]; then
+    cat "$CODEX_LAST" >> "$D/out.log"
+    mv "$CODEX_LAST" "$D/last-message.txt"
+  fi
 
   # Codex quota/session-limit: дивимось ТІЛЬКИ на error реального turn.failed.
   # Не grep по всьому events.jsonl: task/agent/command text легітимно містить
@@ -279,21 +287,24 @@ elif [ "$STYLE" = "none" ]; then
   # очікування видимим (один рядок у out.log), але сам по собі не обмежує
   # його в часі (як у cc-chain.sh).
   RUN_TIMEOUT_S=${CC_RUN_TIMEOUT_S:-2700}
+  cc_v3_clock start
   timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$D/task.md")" $MODELARG $SESSARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" \
     --allowedTools "$TOOLS" < /dev/null > "$D/out.log" 2>&1
 else
   RUN_TIMEOUT_S=${CC_RUN_TIMEOUT_S:-2700}
+  cc_v3_clock start
   timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$D/task.md")" $MODELARG $SESSARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" \
     --allowedTools "$TOOLS" --settings "{\"outputStyle\":\"$STYLE\"}" < /dev/null > "$D/out.log" 2>&1
 fi
 RC=$?
+[ "$BACKEND" = codex ] || cc_v3_clock end
 echo "$RC" > "$D/exit_code"
 
 # Юзедж рахуємо, якщо скрипт є на вузлі; його відсутність — не помилка рану.
-[ -f "$BIN/run-usage.sh" ] && sh "$BIN/run-usage.sh" "$D" > "$D/usage.txt" 2>&1
+[ "$BACKEND" = codex ] || { [ -f "$BIN/run-usage.sh" ] && sh "$BIN/run-usage.sh" "$D" > "$D/usage.txt" 2>&1; }
 
 # Вартість рану + sonnet-еквівалент — у cost.log і telemetry.log (best-effort).
-[ -f "$BIN/cc-cost.sh" ] && sh "$BIN/cc-cost.sh" "$D" >/dev/null 2>&1
+[ "$BACKEND" = codex ] || { [ -f "$BIN/cc-cost.sh" ] && sh "$BIN/cc-cost.sh" "$D" >/dev/null 2>&1; }
 
 # Codex: немає usage.json (claude-специфічний run-usage.sh) — рахуємо токени
 # напряму з turn.completed.usage у events.jsonl. Той самий рядковий формат і
@@ -325,24 +336,28 @@ command -v cc_no_work_guard >/dev/null 2>&1 && cc_no_work_guard "$D" "$BACKEND" 
 
 # Estimator v2: util5h/7d ПІСЛЯ рану (best-effort) — передаються в
 # cc-telemetry.sh env-змінними разом з "до"-значеннями й concurrency.
-UTIL_AFTER=$(backend_util_snapshot)
-UTIL5H_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f1)
-UTIL7D_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f2)
+UTIL5H_AFTER=""; UTIL7D_AFTER=""
+if [ -z "$V3_PATH" ]; then
+  UTIL_AFTER=$(backend_util_snapshot)
+  UTIL5H_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f1)
+  UTIL7D_AFTER=$(echo "$UTIL_AFTER" | cut -d' ' -f2)
+fi
 
-# Телеметрія в swarm.runs (Postgres) — best-effort, ніколи не чіпає код виходу.
-# CC_TELEMETRY_KIND/CC_PARENT_RUN_ID виставляє викликач (cc-swarm.sh для лейнів/fan-in);
-# дефолт — одиночний ран поза роєм/ланцюгом.
-if [ -f "$BIN/cc-telemetry.sh" ]; then
+finish_single(){
+  cc_v3_finish "$D" "$1" "$RC"
+  [ -f "$BIN/cc-telemetry.sh" ] || return 0
   CC_UTIL5H_BEFORE="$UTIL5H_BEFORE" CC_UTIL5H_AFTER="$UTIL5H_AFTER" \
   CC_UTIL7D_BEFORE="$UTIL7D_BEFORE" CC_UTIL7D_AFTER="$UTIL7D_AFTER" \
   CC_CONCURRENT="$CONCURRENT_N" CC_TASK_KIND="$TASK_KIND" \
+  CC_TELEMETRY_BACKEND="$BACKEND" CC_TELEMETRY_MODEL="$CODEXMODEL" CC_TELEMETRY_EXIT="$2" \
     sh "$BIN/cc-telemetry.sh" "$D" "${CC_TELEMETRY_KIND:-run}" "${CC_PARENT_RUN_ID:-}" >/dev/null 2>&1
-fi
+}
 
 # timeout має вищий пріоритет за будь-яку текстову класифікацію помилки.
 # GNU timeout повертає 124: це не quota і не session limit.
 if [ "$RC" = 124 ]; then
   echo "TIMEOUT" > "$D/fail_reason"
+  finish_single timeout 124
   notify "⏱️ $TAG · timeout · <code>$ID</code> · ліміт ${RUN_TIMEOUT_S:-?}s · exit 124"
   exit 124
 fi
@@ -350,6 +365,7 @@ fi
 # session limit — «прийди пізніше», окремий код, не провал задачі (як у ланцюзі).
 # Матчимо окремий marker-рядок, а не довільну згадку в agent output.
 if grep -aqE '^[[:space:]]*session limit([[:space:]]|$)' "$D/out.log" 2>/dev/null; then
+  finish_single quota 3
   notify "⛔ $TAG · session limit · <code>$ID</code> · ран не доїхав, прийди пізніше · exit 3"
   exit 3
 fi
@@ -359,11 +375,13 @@ LINE=$(tail -40 "$D/out.log" | grep -aE "RESULT:[[:space:]]*\**[[:space:]]*(ok|f
 NOTES=$(tail -40 "$D/out.log" | grep -aE "^[[:space:]]*\**[[:space:]]*NOTES:" | tail -1 | cut -c1-200 | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null)
 
 if printf '%s' "$LINE" | grep -aqE "RESULT:[[:space:]]*\**[[:space:]]*ok"; then
+  finish_single ok 0
   notify "✅ $TAG · ok · <code>$ID</code>${NOTES:+ · $(esc "$NOTES")}"
   exit 0
 fi
 
 if [ -n "$LINE" ]; then
+  finish_single fail 2
   notify "❌ $TAG · fail · <code>$ID</code> · exit $RC · RESULT: fail${NOTES:+ · $(esc "$NOTES")}"
   exit 2
 fi
@@ -372,11 +390,13 @@ fi
 # (забув Report-блок), не провал задачі; не позначати як fail наосліп.
 if [ "$RC" = 0 ]; then
   R=$(fail_reason "$D"); echo "$R" > "$D/fail_reason"
+  finish_single ambiguous 4
   notify "⚠️ $TAG · ambiguous · <code>$ID</code> · exit 0, нема RESULT ($R) — перевір out.log вручну${NOTES:+ · $(esc "$NOTES")}"
   exit 4
 fi
 R=$(fail_reason "$D"); echo "$R" > "$D/fail_reason"
 WHY="нема рядка RESULT у хвості логу, $R"
 [ "$RC" = 124 ] && WHY="$WHY, timeout ${RUN_TIMEOUT_S:-2700}s"
+finish_single fail 2
 notify "❌ $TAG · fail · <code>$ID</code> · exit $RC · $WHY${NOTES:+ · $(esc "$NOTES")}"
 exit 2

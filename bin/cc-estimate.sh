@@ -22,7 +22,7 @@
 set -u
 
 MODEL=""; TASK=""; LANES=1; MAXPAR=4; RUN_ID=""; KIND_ARG=""; BACKEND=${CC_BACKEND:-claude}
-COMPARE=0; CHAIN_TASK=""; CHAIN_MODEL="sonnet"; COMPACT_HTML=0
+COMPARE=0; CHAIN_TASK=""; CHAIN_MODEL="sonnet"; COMPACT_HTML=0; OUTPUT_JSON=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --task) TASK=$2; shift 2 ;;
@@ -33,6 +33,7 @@ while [ $# -gt 0 ]; do
     --kind) KIND_ARG=$2; shift 2 ;;
     --backend) BACKEND=$2; shift 2 ;;
     --compact-html) COMPACT_HTML=1; shift ;;
+    --json) OUTPUT_JSON=1; shift ;;
     --compare) COMPARE=1; shift ;;
     --chain-task) CHAIN_TASK=$2; shift 2 ;;
     --chain-model) CHAIN_MODEL=$2; shift 2 ;;
@@ -74,6 +75,20 @@ PG_DB=${CC_PG_DB:-mandrock_kb}
 PG_USER=${CC_PG_USER:-mandrock}
 PG_HOST=${CC_PG_HOST:-127.0.0.1}
 PG_PORT=${CC_PG_PORT:-5432}
+BIN=$(dirname "$(readlink -f "$0")")
+. "$BIN/cc-estimate-v3-lib.sh"
+if [ "$COMPARE" = 0 ] && [ "$LANES" = 1 ] && { [ "$OUTPUT_JSON" = 1 ] || cc_v3_enabled "$BACKEND"; }; then
+  V3_FORMAT=text
+  [ "$COMPACT_HTML" = 0 ] || V3_FORMAT=html
+  [ "$OUTPUT_JSON" = 0 ] || V3_FORMAT=json
+  CC_RUNS="$CC_RUNS" python3 "$BIN/cc-estimate-v3.py" predict --backend "$BACKEND" "--model=$MODEL" \
+    "--effort=${CC_CODEX_EFFORT:-}" "--id=$RUN_ID" --claude-quota --format "$V3_FORMAT" && exit 0
+  [ "$OUTPUT_JSON" = 0 ] || exit 1
+fi
+if [ "$OUTPUT_JSON" = 1 ]; then
+  echo 'cc-estimate: --json для плану доступний через cc-estimate-v3.py predict --plan' >&2
+  exit 1
+fi
 
 # --- кепи ---
 CAP_BASIS="кепи з $CAP_ENV"

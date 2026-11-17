@@ -85,7 +85,7 @@ FINISHED=$([ -f "$D/out.log" ] && stat -c %Y "$D/out.log" 2>/dev/null || echo "$
 DURATION=$((FINISHED - STARTED))
 [ "$DURATION" -ge 0 ] || DURATION=0
 
-EXIT_CODE=$(cat "$D/exit_code" 2>/dev/null || true)
+EXIT_CODE=${CC_TELEMETRY_EXIT:-$(cat "$D/exit_code" 2>/dev/null || true)}
 case "${EXIT_CODE:-}" in
   0) STATUS=ok ;;
   3) STATUS=limit ;;
@@ -96,7 +96,22 @@ EXIT_CODE_SQL="NULL"
 case "${EXIT_CODE:-}" in ''|*[!0-9]*) : ;; *) EXIT_CODE_SQL=$EXIT_CODE ;; esac
 
 TOKENS_IN=0; TOKENS_OUT=0; CACHE_R=0; CACHE_W=0; MODEL="unknown"
-if [ -f "$D/usage.json" ]; then
+if [ "${CC_TELEMETRY_BACKEND:-claude}" = codex ]; then
+  MODEL_RAW=${CC_TELEMETRY_MODEL:-unknown}
+  if [ -f "$D/events.jsonl" ]; then
+    COD_COUNTS=$(jq -rs '
+      [ .[] | select(.type=="turn.completed") | .usage // empty ]
+      | [(map(.input_tokens // 0)|add // 0), (map(.output_tokens // 0)|add // 0),
+         (map(.cached_input_tokens // 0)|add // 0), (map(.cache_write_input_tokens // 0)|add // 0)]
+      | @tsv' "$D/events.jsonl" 2>/dev/null) || COD_COUNTS=""
+    if [ -n "$COD_COUNTS" ]; then
+      TOKENS_IN=$(printf '%s' "$COD_COUNTS" | cut -f1)
+      TOKENS_OUT=$(printf '%s' "$COD_COUNTS" | cut -f2)
+      CACHE_R=$(printf '%s' "$COD_COUNTS" | cut -f3)
+      CACHE_W=$(printf '%s' "$COD_COUNTS" | cut -f4)
+    fi
+  fi
+elif [ -f "$D/usage.json" ]; then
   TOKENS_IN=$(jq -r '.total_in // 0' "$D/usage.json" 2>/dev/null || echo 0)
   TOKENS_OUT=$(jq -r '.total_out // 0' "$D/usage.json" 2>/dev/null || echo 0)
   CACHE_R=$(jq -r '[.models[].cache_r] | add // 0' "$D/usage.json" 2>/dev/null || echo 0)
@@ -147,6 +162,7 @@ ON CONFLICT (run_id) DO UPDATE SET
   duration_s    = EXCLUDED.duration_s,
   exit_code     = EXCLUDED.exit_code,
   status        = EXCLUDED.status,
+  model         = EXCLUDED.model,
   tokens_in     = EXCLUDED.tokens_in,
   tokens_out    = EXCLUDED.tokens_out,
   cache_read    = EXCLUDED.cache_read,

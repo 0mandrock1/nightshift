@@ -45,16 +45,12 @@ BIN=$(dirname "$(readlink -f "$0")")
 # дефолт-ланцюжок резолвиться через CC_RUNS ($(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs), не хардкод.
 CC_RUNS=${CC_RUNS_DIR:-${CC_RUNS:-$(getent passwd "$(id -un)" | cut -d: -f6)/ops/cc-runs}}
 export CC_RUNS
+. "$BIN/cc-estimate-v3-lib.sh"
 
 # --- Тижневий лок (крон cc-week-guard.sh) ---
 # Присутній .week-locked -> тижневого бюджету менше порогу, cc-рани на вузлі
 # заглушено до скидання тижня. Дешева перевірка (без node/jq); знімає лок крон.
 WEEK_LOCK=${CC_WEEK_LOCK:-$CC_RUNS/.week-locked}
-if [ -f "$WEEK_LOCK" ]; then
-  echo "ВІДМОВА: тижневий лок активний ($WEEK_LOCK) — cc-рани заглушено до скидання тижня" >&2
-  exit 5
-fi
-
 REPO=${1:?repo}; PLAN=${2:?swarm-plan}; SWARM_ID=${3:?swarm-id}
 ESCALATION_OF=${ESCALATION_OF:-}
 ATTEMPT=1
@@ -72,6 +68,16 @@ CC_BACKEND=${CC_BACKEND:-claude}
 REPO_ABS=$(cd "$REPO" 2>/dev/null && pwd) || { echo "repo не існує: $REPO" >&2; exit 1; }
 PLAN_ABS=$(readlink -f "$PLAN" 2>/dev/null) || { echo "план не існує: $PLAN" >&2; exit 1; }
 SWARM_DIR="$SWARMS/$SWARM_ID"
+SWARM_HAS_CLAUDE=$(awk -F'|' -v dflt="$CC_BACKEND" '
+  NF && $1 !~ /^[[:space:]]*#/ && $4 !~ /^local:/ {
+    b=$6; if (b=="") b=dflt; if (b!="codex") { print 1; exit }
+  }
+' "$PLAN_ABS") || exit 1
+if [ -f "$WEEK_LOCK" ] && { [ -n "$SWARM_HAS_CLAUDE" ] ||
+    { [ "$CC_BACKEND" = claude ] && [ -f "$PLAN_ABS.fanin" ]; }; }; then
+  echo "ВІДМОВА: тижневий лок Claude активний ($WEEK_LOCK)" >&2
+  exit 5
+fi
 
 notify(){ sh "$CC_NOTIFY" "$*" >/dev/null 2>&1 || true; }
 die(){ echo "cc-swarm: $*" >&2; notify "swarm $SWARM_ID: ВІДМОВА — $*"; exit 1; }
@@ -218,7 +224,25 @@ log "рій $SWARM_ID стартував: $LANE_N лейнів, base=$(echo "$BA
 PREFLIGHT=""
 CC_ESTIMATE_SH=${CC_ESTIMATE_SH:-$BIN/cc-estimate.sh}
 CC_TG_FORMAT_SH=${CC_TG_FORMAT_SH:-$BIN/cc-tg-format.sh}
-if [ -f "$CC_ESTIMATE_SH" ]; then
+PLAN_V3=""
+SWARM_HAS_CODEX=$(awk -F'|' -v dflt="$CC_BACKEND" '
+  NF && $1 !~ /^[[:space:]]*#/ && $4 !~ /^local:/ {
+    b=$6; if (b=="") b=dflt; if (b=="codex") { print 1; exit }
+  }
+' "$PLAN_ABS")
+if [ "$CC_BACKEND" = codex ] && [ -f "$PLAN_ABS.fanin" ]; then SWARM_HAS_CODEX=1; fi
+if { [ -n "$SWARM_HAS_CODEX" ] && cc_v3_enabled codex; } || cc_v3_enabled claude; then
+  CLAUDE_QUOTA=""
+  FANIN_ARG=""
+  cc_v3_enabled claude && CLAUDE_QUOTA=--claude-quota
+  [ ! -f "$PLAN_ABS.fanin" ] || FANIN_ARG=--fanin
+  if python3 "$BIN/cc-estimate-v3.py" predict --mode swarm --plan "$PLAN_ABS" --backend "$CC_BACKEND" \
+      "--effort=${CC_CODEX_EFFORT:-}" --maxpar "$MAXPAR" $FANIN_ARG $CLAUDE_QUOTA \
+      --output "$SWARM_DIR/preflight-v3.json" >/dev/null 2>>"$SWARM_DIR/swarm.log"; then
+    PLAN_V3="$SWARM_DIR/preflight-v3.json"
+  fi
+fi
+if [ -z "$PLAN_V3" ] && [ -f "$CC_ESTIMATE_SH" ]; then
   FIRST_MODEL=$(awk -F'|' '$1!="" && $1!~/^#/{print ($4==""?"haiku":$4); exit}' "$PLAN_ABS")
   FIRST_TASK=$(awk -F'|' '$1!="" && $1!~/^#/{print $2; exit}' "$PLAN_ABS")
   case "$FIRST_MODEL" in local:*) FIRST_MODEL=haiku ;; esac
@@ -243,7 +267,12 @@ if [ -n "$VARLINE" ] && [ -x "$CC_TG_FORMAT_SH" ]; then
     --basis-runs "${V_BASISN:-0}" --basis-err "${V_BASISERR:-}" --confidence "${V_CONF:-низька}" 2>/dev/null)
 fi
 
-if [ -n "$PREFLIGHT_TG" ]; then
+if [ -n "$PLAN_V3" ]; then
+  V3_SWARM_HTML=$(cc_v3_render "$PLAN_V3")
+  log "$V3_SWARM_HTML"
+  notify "Рій $SWARM_ID · $LANE_N лейнів
+$V3_SWARM_HTML"
+elif [ -n "$PREFLIGHT_TG" ]; then
   notify "$PREFLIGHT_TG"
 else
   notify "swarm $SWARM_ID: старт — $LANE_N лейнів, base $(echo "$BASE_SHA" | cut -c1-7)${PREFLIGHT:+ | $PREFLIGHT}"

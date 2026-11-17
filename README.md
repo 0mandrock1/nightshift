@@ -270,3 +270,28 @@ deploy; wrapper auto-commit remains a fallback for uncommitted work.
 The no-work check uses only the active backend's usage source: Codex
 `events.jsonl`, Claude `usage.json`. A previous Claude attempt's zero usage
 cannot override completed Codex work. Unknown usage remains unknown.
+
+## Estimator v3
+
+The preflight separates ETA from account utilization. Use:
+
+    sh bin/cc-estimate.sh --task task.md --backend codex --model sonnet --json
+    python3 bin/cc-estimate-v3.py predict --mode chain --plan plan.txt --backend codex
+    python3 bin/cc-estimate-v3.py backfill "$CC_RUNS"
+    python3 bin/cc-estimate-v3.py replay
+
+Snapshots, decisions, observed model/effort and monotonic CLI duration are
+recorded per attempt in the run directory and in the estimator state under
+$CC_RUNS/.estimate-v3. A prediction uses only completed, available history
+from its own backend. The empirical p90 is provisional. Plans use an
+explicitly labelled scheduling heuristic. Per-run quota attribution is
+unknown, so usage deltas are recorded separately from quota forecasts.
+
+Codex enables v3 by default. Claude uses v3 with
+CC_ESTIMATE_V3_CLAUDE=1 or with a claude-enabled marker in the estimator
+state. CC_ESTIMATE_V3=0 restores the legacy wrapper path.
+CC_ESTIMATE_V3_ENFORCE=0 records provider/due-time decisions in shadow mode.
+The hard provider denial returns 3. An explicitly configured elapsed
+CC_ESTIMATE_DEADLINE_EPOCH returns 8. A future estimated deadline miss is
+a warning. CC_ESTIMATE_TASK_CLASS optionally labels a task for later
+analysis and for model-specific ETA once enough examples exist.

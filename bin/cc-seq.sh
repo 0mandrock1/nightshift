@@ -16,11 +16,11 @@ NOTIFY=${CC_NOTIFY:-$BIN/cc-notify.sh}
 notify(){ [ -f "$NOTIFY" ] || return 0; sh "$NOTIFY" "$*" >/dev/null 2>&1 || true; }
 PASSED=0
 log "seq старт: $PLAN"
-while IFS='|' read -r d style model; do
+while IFS='|' read -r d style model backend; do
   [ -n "${d:-}" ] || continue
   case "$d" in \#*) continue ;; esac
   log "$(basename "$d") старт (style=${style:-none} model=${model:-default})"
-  CC_TAG="$TAG" sh "$BIN/cc-run.sh" "$d" "${style:-none}" "${model:-}" >> "$LOG" 2>&1
+  CC_TAG="$TAG" sh "$BIN/cc-run.sh" "$d" "${style:-none}" "${model:-}" "${backend:-${CC_BACKEND:-claude}}" >> "$LOG" 2>&1
   RC=$?
   log "$(basename "$d") exit=$RC $(tail -1 "$d/usage.txt" 2>/dev/null)"
   if [ "$RC" != 0 ]; then
