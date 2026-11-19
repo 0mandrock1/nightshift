@@ -279,13 +279,22 @@ The preflight separates ETA from account utilization. Use:
     python3 bin/cc-estimate-v3.py predict --mode chain --plan plan.txt --backend codex
     python3 bin/cc-estimate-v3.py backfill "$CC_RUNS"
     python3 bin/cc-estimate-v3.py replay
+    python3 bin/cc-estimate-v3.py quota-replay
 
 Snapshots, decisions, observed model/effort and monotonic CLI duration are
 recorded per attempt in the run directory and in the estimator state under
 $CC_RUNS/.estimate-v3. A prediction uses only completed, available history
 from its own backend. The empirical p90 is provisional. Plans use an
-explicitly labelled scheduling heuristic. Per-run quota attribution is
-unknown, so usage deltas are recorded separately from quota forecasts.
+explicitly labelled scheduling heuristic.
+
+Codex quota forecasts show a typical account-meter increase and a planning upper
+estimate in percentage points. They use at least five recent observations for
+the same model and plan, prefer comparable reasoning effort when available, and
+exclude resets and known overlapping local Codex sessions. The upper estimate
+includes one point for meter granularity and accounts for larger observed runs
+at the requested effort when using model-level history. Other devices can affect
+the meter. A plan sums its Codex steps when all of them have forecasts. A quota
+projection may warn, while enforcement still uses the provider's explicit denial.
 
 Codex enables v3 by default. Claude uses v3 with
 CC_ESTIMATE_V3_CLAUDE=1 or with a claude-enabled marker in the estimator

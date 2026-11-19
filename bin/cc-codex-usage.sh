@@ -63,6 +63,8 @@ try:
         "used7dPercent": u7,
         "reset5h": primary.get("resetsAt"),
         "reset7d": secondary.get("resetsAt"),
+        "duration5h": primary.get("windowDurationMins"),
+        "duration7d": secondary.get("windowDurationMins"),
         "ordinaryUsageAllowed": result.get("ordinaryUsageAllowed"),
         "planType": snap.get("planType"),
         "source": "codex-app-server",

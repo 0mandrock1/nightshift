@@ -19,6 +19,7 @@ import uuid
 sys.dont_write_bytecode = True
 BIN = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(BIN.parent / "lib"))
+import estimate_quota
 from estimate_history import (
     claude_facts, codex_facts, import_claude_history, import_history, live_rows, read, session_root,
 )
@@ -98,10 +99,13 @@ def snapshot(backend):
         used, reset = data.get("util" + key), data.get("reset" + key)
         value = round(used * 100, 2) if type(used) in (float, int) and 0 <= used <= 10 else None
         reset = reset if type(reset) in (int, float) and reset >= 0 else None
+        duration = data.get("duration" + key)
         windows[key] = {"used_percent": value, "reset_at": reset,
+                        "duration_minutes": duration,
                         "usable": fresh and value is not None and (not reset or reset > now)}
     allowed = data.get("ordinaryUsageAllowed")
     return {"backend": backend, "source": source, "observed_at": observed, "fresh": fresh, "windows": windows,
+            "plan_type": data.get("planType"),
             "ordinary_usage_allowed": allowed if type(allowed) is bool else None}
 
 
@@ -113,7 +117,7 @@ def percentile(values, fraction):
     return round(ordered[lower] + (index - lower) * (ordered[upper] - ordered[lower]), 1)
 
 
-def select_history(state):
+def merge_attempts(historical, live):
     def key(row):
         fact = row.get("provider") or {}
         native_id = fact.get("thread_id") or fact.get("session_id")
@@ -121,10 +125,28 @@ def select_history(state):
             return row["backend"], native_id
         return row["backend"], row["attempt_id"]
 
-    baseline = read(state / "history.json", {}) or {}
-    rows = {key(row): row for row in baseline.get("rows", [])}
-    rows.update((key(row), row) for row in live_rows(state))
+    rows = {key(row): row for row in historical}
+    rows.update((key(row), row) for row in live)
     return list(rows.values())
+
+
+def select_history(state):
+    baseline = read(state / "history.json", {}) or {}
+    return merge_attempts(baseline.get("rows", []), live_rows(state))
+
+
+def quota_history(state, attempts):
+    baseline = read(state / "history.json", {}) or {}
+    samples = {row["thread_id"]: row for row in baseline.get("codex_quota", [])}
+    for attempt in attempts:
+        thread = (attempt.get("provider") or {}).get("thread_id")
+        if thread and "codex_quota" in attempt:
+            sample = attempt["codex_quota"]
+            if sample.get("windows"):
+                samples[thread] = sample
+            else:
+                samples.pop(thread, None)
+    return list(samples.values())
 
 
 def forecast(rows, backend, model, effort, cutoff, task_class=None):
@@ -152,7 +174,7 @@ def forecast(rows, backend, model, effort, cutoff, task_class=None):
     return result
 
 
-def policy(quotas, deadline, eta, now):
+def policy(quotas, deadline, eta, now, quota_forecast=None):
     if deadline is not None and now >= deadline:
         return {"action": "block", "reason": "deadline_elapsed"}
     warnings = []
@@ -167,6 +189,12 @@ def policy(quotas, deadline, eta, now):
     if any(w["usable"] and w["used_percent"] >= 90 for w in windows):
         warnings.append("current_quota_high")
     hi = eta.get("p90_seconds", eta.get("upper_seconds"))
+    if hi is not None and any(
+        (window := codex.get("windows", {}).get(key, {})).get("usable") and window.get("reset_at")
+        and window["reset_at"] > now + hi and window["used_percent"] + tip["planning_upper_pp"] >= 100
+        for key, tip in (quota_forecast or {}).get("windows", {}).items() if "planning_upper_pp" in tip
+    ):
+        warnings.append("forecast_quota_at_risk")
     if deadline is not None and (hi is None or now + hi > deadline):
         warnings.append("deadline_at_risk")
     if warnings:
@@ -193,7 +221,9 @@ def plan_steps(path, mode, backend):
 
 def estimate(args):
     now = time.time()
-    rows = select_history(state_path())
+    state = state_path()
+    rows = select_history(state)
+    samples = quota_history(state, rows)
     specifications = plan_steps(args.plan, args.mode, args.backend) if args.plan else [
         (args.id or "run", args.backend, args.model, False)]
     if args.plan and args.mode == "swarm" and args.fanin:
@@ -225,10 +255,17 @@ def estimate(args):
                     lanes[i] += step["eta"][key]
                 values[name] = round(max(lanes) + sum(s["eta"][key] for s in serial), 1)
             eta = {"status": "schedule_heuristic", **values}
+    codex_predictions = []
+    plan = quotas.get("codex", {}).get("plan_type")
+    for step in steps:
+        if step["backend"] == "codex":
+            tip = estimate_quota.forecast(samples, step["model"], step["effort"], plan, now)
+            step["quota_forecast"] = tip
+            codex_predictions.append(tip)
+    quota_forecast = estimate_quota.aggregate(codex_predictions) if codex_predictions else {"status": "unsupported"}
     result = {"schema": 3, "mode": args.mode, "generated_at": now, "eta": eta, "steps": steps, "quotas": quotas,
-              "quota_forecast": {"status": "unavailable", "reason": "awaiting_clean_pairs"},
-              "deadline_epoch": args.deadline, "task_class": args.task_class,
-              "decision": policy(quotas, args.deadline, eta, now)}
+              "quota_forecast": quota_forecast, "deadline_epoch": args.deadline, "task_class": args.task_class,
+              "decision": policy(quotas, args.deadline, eta, now, quota_forecast)}
     if args.attempt:
         result["attempt_id"] = str(uuid.uuid4())
     if args.output:
@@ -259,11 +296,30 @@ def render(data, markup=True):
             p = w["used_percent"]
             windows.append(f"{key} {p:g}%" + ("" if w["usable"] else " (неактуально)") if p is not None else f"{key} н/д")
         lines.append(f"{backend} " + " · ".join(windows) + " · " + q["source"])
-    lines.append("Прогноз витрат квоти н/д")
+    tip = data.get("quota_forecast") or {}
+    if tip.get("backend") == "codex":
+        parts = []
+        for key, window in tip["windows"].items():
+            if "typical_pp" in window:
+                typical = f"≈{window['typical_pp']:g}" if window["typical_pp"] >= 1 else "<1"
+                basis = {"model": "модель", "model_effort": "модель і рівень міркування", "sum_of_steps": "мін. на крок"}[window["basis"]]
+                parts.append(f"{key} {typical}, верх {window['planning_upper_pp']} в.п. ({basis}: n={window['n']})")
+            elif "steps_covered" in window:
+                parts.append(f"{key} · є дані для {window['steps_covered']}/{tip['steps']} кроків")
+            else:
+                parts.append(f"{key} · {window['n']}/{estimate_quota.MIN_SAMPLES} вимірів")
+        if parts:
+            label = "Витрати Codex, сума кроків" if "steps" in tip else "Витрати Codex, оцінка"
+            lines.extend([label, *parts])
+        else:
+            lines.append("Оцінка витрат Codex недоступна · провайдер не підтвердив тариф")
+    elif any(step["backend"] == "claude" for step in data["steps"]):
+        lines.append("Для Claude показано поточну квоту")
     if data["decision"]["action"] != "allow":
         descriptions = {"quota_unavailable": "поточна квота недоступна", "codex_provider_denied": "Codex призупинив звичайні запуски",
                         "current_quota_high": "залишок квоти малий", "deadline_at_risk": "ризик вийти за дедлайн",
-                        "deadline_elapsed": "вказаний дедлайн минув"}
+                        "deadline_elapsed": "вказаний дедлайн минув",
+                        "forecast_quota_at_risk": "за верхньою оцінкою можливе вичерпання квоти"}
         reasons = data["decision"].get("warnings", [data["decision"]["reason"]])
         lines.extend(descriptions.get(reason, reason) for reason in reasons)
     retry_at = data["decision"].get("retry_at")
@@ -336,6 +392,9 @@ def finalize(args):
               "quota_before": before, "quota_after": after,
               "quota_observed_delta": quota_delta(before, after),
               "prediction": data, "provider": fact}
+    if timed and backend == "codex" and fact.get("thread_id"):
+        profiles = estimate_quota.scan_sessions(session_root(), since=args.start_epoch - 120)
+        record["codex_quota"] = estimate_quota.sample_attempt(record, profiles)
     write(state_path() / "attempts" / (record["attempt_id"] + ".json"), record)
     write(args.run_dir / "attempt-v3.json", record)
 
@@ -409,6 +468,7 @@ def main():
     p.add_argument("runs", type=pathlib.Path)
     p.add_argument("--include-claude", action="store_true")
     sub.add_parser("replay")
+    sub.add_parser("quota-replay")
     p = sub.add_parser("snapshot")
     p.add_argument("backend", choices=("codex", "claude"))
     sub.add_parser("clock")
@@ -428,10 +488,17 @@ def main():
             counts.update(claude_counts)
         else:
             claude = [row for row in previous.get("rows", []) if row["backend"] == "claude"]
-        write(state_path() / "history.json", {"schema": 3, "generated_at": time.time(), "rows": rows + claude})
-        emit(counts)
+        attempts = merge_attempts(rows, live_rows(state_path()))
+        samples, rejected = estimate_quota.build_history(attempts, session_root())
+        write(state_path() / "history.json", {"schema": 3, "generated_at": time.time(), "rows": rows + claude,
+                                              "codex_quota": samples})
+        emit(counts | {"codex_quota_observations": len(samples), "codex_quota_rejected": rejected})
     elif args.command == "replay":
         replay(select_history(state_path()))
+    elif args.command == "quota-replay":
+        state = state_path()
+        samples = quota_history(state, select_history(state))
+        emit(estimate_quota.replay(samples))
     elif args.command == "snapshot":
         emit(snapshot(args.backend))
     else:
