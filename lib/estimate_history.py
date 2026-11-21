@@ -29,6 +29,16 @@ def read(path, default=None):
         return default
 
 
+def artifact_times(directory, names):
+    results = []
+    for name in names:
+        try:
+            results.append((directory / name).stat().st_mtime)
+        except OSError:
+            continue
+    return results
+
+
 def codex_facts(directory, sessions):
     thread = None
     usage = collections.Counter()
@@ -137,10 +147,11 @@ def import_history(root, sessions):
             outcome = "unknown"
         if start is None or finish is None:
             continue
+        recorded = max([finish] + artifact_times(directory, ("exit_code", "events.jsonl")))
         rows.append({"backend": "codex", "run_id": directory.name,
                      "attempt_id": thread, "model": fact["model"], "effort": fact["effort"],
                      "started_at": start, "finished_at": finish, "seconds": finish - start,
-                     "outcome": outcome, "source": "codex_session", "provider": fact})
+                     "recorded_at": recorded, "outcome": outcome, "source": "codex_session", "provider": fact})
     return rows, dict(inventory)
 
 
@@ -156,7 +167,7 @@ def session_root():
     return codex_home / "sessions"
 
 
-def import_claude_history(root):
+def claude_run_records(root):
     creds = pathlib.Path(os.environ.get("CC_PG_CREDS", root / "creds-pg.env"))
     password = next((line.partition("=")[2] for line in creds.read_text().splitlines()
                      if line.startswith("POSTGRES_PASSWORD=")), None)
@@ -172,7 +183,8 @@ def import_claude_history(root):
     query = """BEGIN READ ONLY;
     SELECT coalesce(json_agg(r), '[]') FROM (
       SELECT run_id, model AS tier, status AS outcome, extract(epoch FROM started_at) AS started_at,
-             extract(epoch FROM finished_at) AS finished_at, duration_s AS seconds
+             extract(epoch FROM finished_at) AS finished_at, duration_s AS seconds,
+             extract(epoch FROM created_at) AS recorded_at
       FROM swarm.runs WHERE kind IN ('run','lane','fanin') AND duration_s > 0
         AND started_at IS NOT NULL AND finished_at > started_at
         AND (model IN ('sonnet','opus','haiku') OR model LIKE 'claude-%')
@@ -181,9 +193,13 @@ def import_claude_history(root):
     """
     result = subprocess.run(command, input=query, text=True, check=True, capture_output=True,
                             timeout=20, env=os.environ | {"PGPASSWORD": password})
+    return json.loads(result.stdout)
+
+
+def import_claude_history(root):
     counts = collections.Counter()
     rows = []
-    for row in json.loads(result.stdout):
+    for row in claude_run_records(root):
         counts["claude_db_candidates"] += 1
         directory = root / row["run_id"]
         if (directory / "events.jsonl").is_file() or not (directory / "usage.json").is_file():
@@ -195,7 +211,9 @@ def import_claude_history(root):
         evidence = claude_facts(directory)
         exact_model = evidence.get("model")
         counts["claude_session_id_matches"] += bool(exact_model)
-        rows.append(row | {"backend": "claude", "attempt_id": "legacy:" + row["run_id"],
+        recorded = max(row["recorded_at"], row["finished_at"],
+                       *artifact_times(directory, ("exit_code", "usage.json", "session_id")))
+        rows.append(row | {"backend": "claude", "recorded_at": recorded, "attempt_id": "legacy:" + row["run_id"],
                            "model": exact_model or row["tier"], "source": "mtime_proxy",
                            "model_source": "matched_session" if exact_model else "legacy_usage",
                            "provider": evidence if exact_model else {}})

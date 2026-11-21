@@ -136,7 +136,8 @@ log(){ echo "[$(date -u +%H:%M:%S)] $*" >> "$CHAIN"; }
 # notify — afterflight (ok/fail/session/ланцюг), зі звуком, однорядковий телеграф.
 # notify_silent — preflight (старт, <pre>-таблиця), без звуку (disable_notification).
 NOTIFY=${CC_NOTIFY:-$BIN/cc-notify.sh}
-notify(){ [ -f "$NOTIFY" ] || return 0; sh "$NOTIFY" "$*" >/dev/null 2>&1 || true; }
+notify(){ [ -f "$NOTIFY" ] || return 0; sh "$NOTIFY" "$*${V3_FACT:+
+<pre>$V3_FACT</pre>}" >/dev/null 2>&1 || true; }
 notify_silent(){ [ -f "$NOTIFY" ] || return 0; sh "$NOTIFY" "$1" silent >/dev/null 2>&1 || true; }
 PASSED=0
 
@@ -259,20 +260,26 @@ RESULTCONTRACT
   TASK_KIND=$(command -v cc_task_kind >/dev/null 2>&1 && cc_task_kind "$id" || echo "${id%%-*}")
   CONCURRENT_N=$(command -v cc_concurrent_others >/dev/null 2>&1 && cc_concurrent_others || echo "")
   UTIL5H_BEFORE=""; UTIL7D_BEFORE=""
-  if cc_v3_begin "$d" "$backend" "$model" "$id"; then
-    STEP_PREFLIGHT=$(cc_v3_render "$V3_PATH")
-    printf '%s\n' "$STEP_PREFLIGHT" > "$d/preflight.log"
-    log "$id: $STEP_PREFLIGHT"
+  STEP_PREFLIGHT=""
+  stop_if_denied(){
     if STOP_CODE=$(cc_v3_stop_code); then
       CLAUDE_EXIT=$STOP_CODE
       OUTCOME=deferred
       [ "$STOP_CODE" != 8 ] || OUTCOME=blocked
       echo "$STOP_CODE" > "$d/exit_code"
       chain_telemetry "$d" "$OUTCOME"
-      notify "⛔ $TAG · запуск призупинено · <code>$id</code>
+      REASON="провайдер призупинив запуски"
+      [ "$STOP_CODE" != 8 ] || REASON="вказаний дедлайн минув"
+      notify "⛔ $TAG · $REASON · <code>$id</code>
 $STEP_PREFLIGHT"
       exit "$STOP_CODE"
     fi
+  }
+  if CC_TELEMETRY_KIND=chain_step cc_v3_begin "$d" "$backend" "$model" "$id"; then
+    STEP_PREFLIGHT=$(cc_v3_render "$V3_PATH")
+    printf '%s\n' "$STEP_PREFLIGHT" > "$d/preflight.log"
+    log "$id: $STEP_PREFLIGHT"
+    stop_if_denied
     notify_silent "<b>$TAG · крок</b> · <code>$id</code>
 $STEP_PREFLIGHT"
   elif [ "$backend" = claude ]; then
@@ -281,11 +288,12 @@ $STEP_PREFLIGHT"
     UTIL7D_BEFORE=$(echo "$UTIL_BEFORE" | cut -d' ' -f2)
   fi
   SESSARG=""
-  if [ "$backend" = claude ] && [ -n "$V3_PATH" ]; then
+  if [ "$backend" = claude ]; then
     SESSID=$(cat /proc/sys/kernel/random/uuid)
     printf '%s\n' "$SESSID" > "$d/session_id"
     SESSARG="--session-id $SESSID"
   fi
+  stop_if_denied
   log "$id старт (backend=$backend, style=$style, base=$(cut -c1-7 < $d/base_sha))"
   # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0: без цього headless-сесія може
   # вийти по стелі очікування фонової задачі (Task/background bash),
@@ -557,4 +565,5 @@ while IFS='|' read -r slug style_raw task model backend_raw; do
   do_run "$slug" "$style" "$task" "${model:-}" "${backend_raw:-}"
 done < "$PLAN"
 log "ланцюг пройшов повністю, гілка $(git -C "$CWD" rev-parse --abbrev-ref HEAD)"
+V3_FACT=""
 notify "✅ $TAG · ланцюг пройшов · $PASSED ранів ok · гілка $(git -C "$CWD" rev-parse --abbrev-ref HEAD) · exit 0"

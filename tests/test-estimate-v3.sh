@@ -77,6 +77,12 @@ assert len(rows) == 6
 assert module.forecast(rows, "codex", "gpt-6-luna", None, 10)["p50_seconds"] is None
 assert module.forecast(rows, "codex", "gpt-6-luna", None, 11)["p50_seconds"] == 60
 assert module.forecast(rows, "claude", "gpt-6-luna", None, 11)["p50_seconds"] is None
+# A late replacement may not hide an older, already recorded version of the same session.
+module.write(state / "attempts" / "a.json", row("a", "3", 4) | {"recorded_at": 20, "seconds": 120})
+eligible = module.select_history(state, 11)
+assert module.forecast(eligible, "codex", "gpt-6-luna", None, 11)["n"] == 5
+assert next(r for r in eligible if r["provider"]["thread_id"] == "3")["seconds"] == 60
+
 now = 1000
 w = {"used_percent": 20, "reset_at": 1200, "usable": True}
 q = {"backend": "codex", "fresh": True, "observed_at": now, "windows": {"5h": w, "7d": w}}

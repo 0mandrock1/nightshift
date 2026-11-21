@@ -9,6 +9,7 @@ import math
 import os
 import pathlib
 import signal
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -19,12 +20,15 @@ import uuid
 sys.dont_write_bytecode = True
 BIN = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(BIN.parent / "lib"))
+import estimate_claude_meter as claude_meter
+import estimate_eta
 import estimate_quota
 from estimate_history import (
     claude_facts, codex_facts, import_claude_history, import_history, live_rows, read, session_root,
 )
 
 WINDOWS = ("5h", "7d")
+SHADOW_RECENT = {"claude": None, "codex": 24}
 
 
 def state_path():
@@ -63,20 +67,23 @@ def model_key(backend, model):
     return model
 
 
-def snapshot(backend):
+def snapshot(backend, claude_option=None):
     if backend == "codex":
         command = ["sh", str(BIN / "cc-codex-usage.sh"), "--json"]
         env = os.environ | {"CC_CODEX_USAGE_BIN": os.environ.get("CC_CODEX_USAGE_BIN", "codex" if os.environ.get("CC_CODEX_BIN", "codex") == "codex" else "false")}
     else:
         cli = os.environ.get("CC_USAGE_CLI", "/root/projects/tg_bots/mandrock0_cc_bot/usage-cli.js")
         command = ["node", cli, "--ratelimit-json"]
+        if claude_option:
+            command.append(claude_option)
         env = os.environ
     data = {}
     try:
         with subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               start_new_session=True) as proc:
             try:
-                output, _ = proc.communicate(timeout=8 if backend == "codex" else 15)
+                timeout = 12 if backend == "codex" else 28 if claude_option == "--force" else 15
+                output, _ = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
@@ -90,7 +97,7 @@ def snapshot(backend):
                     data = value
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
-    now = int(time.time())
+    now = time.time()
     source = data.get("source") or "unavailable"
     observed = now if source == "codex-app-server" else data.get("ts")
     fresh = isinstance(observed, (int, float)) and 0 <= now - observed <= 240 and source not in ("none", "stale")
@@ -105,8 +112,26 @@ def snapshot(backend):
                         "usable": fresh and value is not None and (not reset or reset > now)}
     allowed = data.get("ordinaryUsageAllowed")
     return {"backend": backend, "source": source, "observed_at": observed, "fresh": fresh, "windows": windows,
+            "sample_id": data.get("sampleId"),
+            **({"probe_end": data["probeEnd"]} if "probeEnd" in data else {}),
+            **({"probe_error": data["probeError"]} if "probeError" in data else {}),
             "plan_type": data.get("planType"),
             "ordinary_usage_allowed": allowed if type(allowed) is bool else None}
+
+
+def measured_claude_snapshot(meter, *, allow_probe=True):
+    if not allow_probe:
+        return snapshot("claude", "--cache-only") | {"probe_status": "skipped_without_before"}
+    try:
+        reserved = claude_meter.reserve_probe(meter)
+    except (OSError, sqlite3.Error) as error:
+        print(f"Claude quota probe reservation: {error}", file=sys.stderr)
+        return snapshot("claude", "--cache-only") | {"probe_status": "control_unavailable"}
+    if not reserved:
+        return snapshot("claude", "--cache-only") | {"probe_status": "throttled"}
+    reading = snapshot("claude", "--force")
+    independent = reading["fresh"] and reading["source"] == "live" and bool(reading["sample_id"])
+    return reading | {"probe_status": "independent" if independent else "probe_unavailable"}
 
 
 def percentile(values, fraction):
@@ -130,9 +155,18 @@ def merge_attempts(historical, live):
     return list(rows.values())
 
 
-def select_history(state):
+def available_before(row, cutoff):
+    finished = row.get("finished_at")
+    return finished is not None and max(finished, row.get("recorded_at") or finished) < cutoff
+
+
+def select_history(state, cutoff=None):
     baseline = read(state / "history.json", {}) or {}
-    return merge_attempts(baseline.get("rows", []), live_rows(state))
+    historical, live = baseline.get("rows", []), live_rows(state)
+    if cutoff is not None:
+        historical = [row for row in historical if available_before(row, cutoff)]
+        live = (row for row in live if available_before(row, cutoff))
+    return merge_attempts(historical, live)
 
 
 def quota_history(state, attempts):
@@ -155,7 +189,7 @@ def forecast(rows, backend, model, effort, cutoff, task_class=None):
              and r.get("model") and r.get("model_source") != "resolved_only"
              and (r["model"] == model if backend == "claude" and model.startswith("claude-")
                   else model_key(backend, r["model"]) == key)
-             and r.get("finished_at") is not None and (r.get("recorded_at") or r["finished_at"]) < cutoff
+             and available_before(r, cutoff)
              and type(r.get("seconds")) in (int, float) and r["seconds"] > 0]
     scope = "model"
     same_class = [r for r in known if r.get("task_class") == task_class] if task_class else []
@@ -222,29 +256,52 @@ def plan_steps(path, mode, backend):
 def estimate(args):
     now = time.time()
     state = state_path()
-    rows = select_history(state)
+    rows = select_history(state, now)
     samples = quota_history(state, rows)
     specifications = plan_steps(args.plan, args.mode, args.backend) if args.plan else [
         (args.id or "run", args.backend, args.model, False)]
     if args.plan and args.mode == "swarm" and args.fanin:
         specifications.append(("fan-in", args.backend, "sonnet", True))
     quotas, steps = {}, []
+    attempt_id = str(uuid.uuid4()) if args.attempt else None
+    meter = state / "claude-meter.sqlite3"
+    probe_enabled = os.environ.get("CC_ESTIMATE_CLAUDE_PROBES") == "1"
+    tracked = False
+    if attempt_id and args.backend == "claude" and not args.plan and (probe_enabled or meter.exists()):
+        try:
+            claude_meter.register(meter, attempt_id, args.wrapper_pid or os.getppid())
+            tracked = True
+        except (OSError, sqlite3.Error) as error:
+            print(f"Claude quota attempt registration: {error}", file=sys.stderr)
+    shadow = os.environ.get("CC_ESTIMATE_ETA_SHADOW") == "1"
     for name, backend, requested, fanin in specifications:
         if backend not in ("claude", "codex", "local"):
             raise ValueError("invalid backend")
         if backend not in quotas and backend != "local" and (backend == "codex" or args.claude_quota):
-            quotas[backend] = snapshot(backend)
+            if backend == "claude" and attempt_id and probe_enabled:
+                quotas[backend] = (measured_claude_snapshot(meter) if tracked else
+                                   snapshot(backend, "--cache-only") | {"probe_status": "control_unavailable"})
+            else:
+                quotas[backend] = snapshot(backend)
         model = resolve(backend, requested)
         effort = (args.effort or None) if backend == "codex" else None
-        steps.append({"name": name, "backend": backend, "requested_model": requested, "model": model,
-                      "effort": effort, "fanin": fanin,
-                      "eta": forecast(rows, backend, model, effort, now, args.task_class)})
+        mode = ("chain_step" if args.mode == "chain" else "fanin" if fanin else "lane") if args.plan else (
+            os.environ.get("CC_TELEMETRY_KIND") or "run")
+        step = {"name": name, "backend": backend, "requested_model": requested, "model": model,
+                "effort": effort, "fanin": fanin, "mode": mode,
+                "eta": forecast(rows, backend, model, effort, now, args.task_class)}
+        if shadow and backend in SHADOW_RECENT:
+            step["eta_shadow"] = estimate_eta.candidate(
+                rows, backend, model, effort, now, args.task_class, mode, recent=SHADOW_RECENT[backend])
+        steps.append(step)
     if not steps:
         raise ValueError("empty plan")
     eta = steps[0]["eta"]
     if args.plan:
-        eta = {"status": "insufficient_history", "p50_seconds": None, "upper_seconds": None}
-        if all(s["eta"]["p50_seconds"] is not None for s in steps):
+        missing = [s["name"] for s in steps if s["eta"]["p50_seconds"] is None]
+        eta = {"status": "insufficient_history", "p50_seconds": None, "upper_seconds": None,
+               "steps_covered": len(steps) - len(missing), "steps_total": len(steps), "missing_steps": missing}
+        if not missing:
             serial = [s for s in steps if args.mode == "chain" or s["fanin"]]
             parallel = [s for s in steps if s not in serial]
             values = {}
@@ -254,7 +311,7 @@ def estimate(args):
                     i = min(range(len(lanes)), key=lanes.__getitem__)
                     lanes[i] += step["eta"][key]
                 values[name] = round(max(lanes) + sum(s["eta"][key] for s in serial), 1)
-            eta = {"status": "schedule_heuristic", **values}
+            eta.update(status="schedule_heuristic", **values)
     codex_predictions = []
     plan = quotas.get("codex", {}).get("plan_type")
     for step in steps:
@@ -265,9 +322,9 @@ def estimate(args):
     quota_forecast = estimate_quota.aggregate(codex_predictions) if codex_predictions else {"status": "unsupported"}
     result = {"schema": 3, "mode": args.mode, "generated_at": now, "eta": eta, "steps": steps, "quotas": quotas,
               "quota_forecast": quota_forecast, "deadline_epoch": args.deadline, "task_class": args.task_class,
-              "decision": policy(quotas, args.deadline, eta, now, quota_forecast)}
-    if args.attempt:
-        result["attempt_id"] = str(uuid.uuid4())
+              "decision": policy(quotas, args.deadline, eta, time.time(), quota_forecast)}
+    if attempt_id:
+        result.update(attempt_id=attempt_id, claude_meter_tracked=tracked)
     if args.output:
         write(args.output, result)
     if args.format == "json":
@@ -287,7 +344,12 @@ def render(data, markup=True):
     eta_basis = None
     plain_note = []
     if eta["p50_seconds"] is None:
-        eta_lines.append("ETA н/д · історія " + str(eta.get("n", sum(s["eta"]["n"] for s in data["steps"]))))
+        if "steps_covered" in eta:
+            eta_lines.append(f"ETA плану н/д · є історія для {eta['steps_covered']}/{eta['steps_total']} кроків")
+            missing = eta["missing_steps"]
+            eta_lines.append("Без ETA · " + ", ".join(missing[:5]) + (f" · +{len(missing)-5}" if len(missing) > 5 else ""))
+        else:
+            eta_lines.append("ETA н/д · історія " + str(eta.get("n", sum(s["eta"]["n"] for s in data["steps"]))))
     else:
         upper = eta.get("p90_seconds", eta.get("upper_seconds"))
         eta_basis = f"n={eta['n']}" if "n" in eta else "сума/розклад кроків"
@@ -299,6 +361,12 @@ def render(data, markup=True):
             p = w["used_percent"]
             windows.append(f"{key} {p:g}%" + ("" if w["usable"] else " (неактуально)") if p is not None else f"{key} н/д")
         quota_lines.append(f"{backend} " + " · ".join(windows) + " · " + q["source"])
+        if q.get("probe_status"):
+            messages = {"independent": "Claude · окремий відлік до рану",
+                        "throttled": "Claude · відлік пропущено через частоту запитів",
+                        "probe_unavailable": "Claude · провайдер не повернув окремий відлік",
+                        "control_unavailable": "Claude · контроль відліків недоступний"}
+            quota_lines.append(messages[q["probe_status"]])
     tip = data.get("quota_forecast") or {}
     if tip.get("backend") == "codex":
         parts = []
@@ -357,11 +425,13 @@ def render(data, markup=True):
         print("⚠️ " + "\n".join(map(escape, notices)))
 
 
-def quota_delta(before, after):
+def quota_delta(before, after, pair_issue=None):
     """Account changes measured around a run, with unknown external attribution."""
     results = {}
     for key in WINDOWS:
-        if not before or not after:
+        if pair_issue:
+            reason = pair_issue
+        elif not before or not after:
             reason = "missing_snapshot"
         elif before["backend"] != after["backend"] or not before["fresh"] or not after["fresh"]:
             reason = "incompatible_snapshot"
@@ -371,7 +441,8 @@ def quota_delta(before, after):
             a, b = before["windows"][key], after["windows"][key]
             if not a["usable"] or not b["usable"]:
                 reason = "window_unavailable"
-            elif a["reset_at"] is None or b["reset_at"] is None:
+            elif (a["reset_at"] is None or b["reset_at"] is None
+                  or min(a["reset_at"], b["reset_at"]) <= after["observed_at"]):
                 reason = "window_changed_or_unknown"
             elif a["reset_at"] != b["reset_at"] and not (
                 before["backend"] == "codex" and abs(a["reset_at"] - b["reset_at"]) <= 1
@@ -383,7 +454,8 @@ def quota_delta(before, after):
             else:
                 match = "equal_reset" if a["reset_at"] == b["reset_at"] else "codex_reset_jitter_1s"
                 results[key] = {"status": "account_delta", "attribution": "unknown", "window_match": match,
-                                "percentage_points": round(b["used_percent"] - a["used_percent"], 2)}
+                                "percentage_points": round(b["used_percent"] - a["used_percent"], 2),
+                                "source": {"before": before.get("source"), "after": after.get("source")}}
                 continue
         results[key] = {"status": "unavailable", "reason": reason}
     return results
@@ -393,6 +465,8 @@ def finalize(args):
     data = read(args.preflight)
     if not data:
         return
+    if args.outcome == "blocked" and args.rc == 8:
+        data["decision"] = {"action": "block", "reason": "deadline_elapsed"}
     step = data["steps"][0]
     backend = step["backend"]
     mono = args.end_ns - args.start_ns if args.start_ns and args.end_ns else None
@@ -401,7 +475,22 @@ def finalize(args):
     if timed:
         fact = codex_facts(args.run_dir, session_root()) if backend == "codex" else claude_facts(args.run_dir)
     before = data["quotas"].get(backend)
-    after = snapshot(backend) if timed else None
+    state = state_path()
+    controlled = before and before.get("probe_status")
+    after = None
+    overlap = None
+    if timed:
+        after = (measured_claude_snapshot(state / "claude-meter.sqlite3",
+                                         allow_probe=controlled == "independent")
+                 if controlled else snapshot(backend))
+    if data.get("claude_meter_tracked"):
+        try:
+            overlap = claude_meter.close_attempt(state / "claude-meter.sqlite3", data["attempt_id"],
+                                                 (before or {}).get("observed_at"),
+                                                 (after or {}).get("observed_at"))
+        except (OSError, sqlite3.Error) as error:
+            print(f"Claude quota attempt close: {error}", file=sys.stderr)
+    pair_issue = claude_meter.pair_issue(before, after, args.start_epoch, args.end_epoch, overlap) if controlled else None
     record = {"attempt_id": data["attempt_id"], "run_id": args.run_dir.name,
               "backend": backend, "requested_model": step["requested_model"], "resolved_model": step["model"],
               "model": fact.get("model") or step["model"], "effort": fact.get("effort") or step["effort"],
@@ -415,13 +504,35 @@ def finalize(args):
               "seconds": round(mono / 1e9, 3) if timed else None,
               "source": "wrapper_monotonic" if timed else "preflight_only",
               "quota_before": before, "quota_after": after,
-              "quota_observed_delta": quota_delta(before, after),
+              "quota_observed_delta": quota_delta(before, after, pair_issue),
               "prediction": data, "provider": fact}
+    if controlled:
+        record["claude_meter"] = {"local_overlap": overlap,
+                                  "includes_final_probe": bool(after and after.get("probe_status") == "independent")}
     if timed and backend == "codex" and fact.get("thread_id"):
         profiles = estimate_quota.scan_sessions(session_root(), since=args.start_epoch - 120)
         record["codex_quota"] = estimate_quota.sample_attempt(record, profiles)
-    write(state_path() / "attempts" / (record["attempt_id"] + ".json"), record)
+    write(state / "attempts" / (record["attempt_id"] + ".json"), record)
     write(args.run_dir / "attempt-v3.json", record)
+
+
+def render_observation(data):
+    if not data:
+        return
+    observed = data.get("quota_observed_delta", {})
+    values = [f"{key} {w['percentage_points']:+g} в.п."
+              for key, w in observed.items() if w["status"] == "account_delta"]
+    if values:
+        label = "Лічильник рахунку, включно з фінальним відліком" if data.get("claude_meter") else "Лічильник рахунку"
+        print(label + " · " + " · ".join(values))
+    elif data.get("claude_meter") and data.get("seconds") is not None:
+        messages = {"missing_snapshot": "немає відліку", "incompatible_snapshot": "неактуальний відлік",
+                    "same_or_older_snapshot": "повторний відлік", "independent_probe_unavailable": "немає двох незалежних відліків",
+                    "probe_outside_run_edges": "відлік за межами рану", "local_overlap_unknown": "перетин невідомий",
+                    "overlapping_local_attempt": "паралельний Claude-ран", "window_changed_or_unknown": "reset або невідоме вікно",
+                    "window_unavailable": "лічильник вікна недоступний", "decreased": "лічильник зменшився"}
+        details = [f"{key} {messages[w['reason']]}" for key, w in observed.items()]
+        print("Лічильник рахунку н/д · " + " · ".join(details))
 
 
 def replay(rows):
@@ -478,10 +589,13 @@ def main():
     p.add_argument("--fanin", action="store_true")
     p.add_argument("--claude-quota", action="store_true")
     p.add_argument("--attempt", action="store_true")
+    p.add_argument("--wrapper-pid", type=int)
     p.add_argument("--output", type=pathlib.Path)
     p.add_argument("--format", choices=("json", "html", "text"), default="json")
     p = sub.add_parser("render")
     p.add_argument("preflight", type=pathlib.Path)
+    p = sub.add_parser("render-observation")
+    p.add_argument("attempt", type=pathlib.Path)
     p = sub.add_parser("finalize")
     p.add_argument("run_dir", type=pathlib.Path)
     p.add_argument("preflight", type=pathlib.Path)
@@ -493,7 +607,9 @@ def main():
     p.add_argument("runs", type=pathlib.Path)
     p.add_argument("--include-claude", action="store_true")
     sub.add_parser("replay")
-    sub.add_parser("quota-replay")
+    p = sub.add_parser("quota-replay")
+    p.add_argument("--details", action="store_true")
+    p.add_argument("--since", type=timestamp)
     p = sub.add_parser("snapshot")
     p.add_argument("backend", choices=("codex", "claude"))
     sub.add_parser("clock")
@@ -502,6 +618,8 @@ def main():
         estimate(args)
     elif args.command == "render":
         render(read(args.preflight))
+    elif args.command == "render-observation":
+        render_observation(read(args.attempt))
     elif args.command == "finalize":
         finalize(args)
     elif args.command == "backfill":
@@ -523,7 +641,7 @@ def main():
     elif args.command == "quota-replay":
         state = state_path()
         samples = quota_history(state, select_history(state))
-        emit(estimate_quota.replay(samples))
+        emit(estimate_quota.replay(samples, details=args.details, since=args.since))
     elif args.command == "snapshot":
         emit(snapshot(args.backend))
     else:

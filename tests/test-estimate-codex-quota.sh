@@ -24,6 +24,16 @@ other = {"account": "unknown-different", "ranges": [(1010, 1020)], "points": []}
 assert sample_attempt(run, {"run": profile, "other": other})["windows"]["5h"]["delta_pp"] == 5
 assert sample_attempt(run, {"run": profile, "other": other | {"account": None}})["reason"] == "overlapping_local_session"
 assert sample_attempt(run, {"run": profile, "other": other | {"account": "account"}})["reason"] == "overlapping_local_session"
+# A short run can have one in-session counter event and two valid wrapper reads.
+one_point = profile | {"points": profile["points"][:1]}
+assert sample_attempt(run, {"run": one_point})["windows"]["5h"]["source"] == "wrapper"
+assert sample_attempt(run, {"run": one_point})["attribution"] == "unknown"
+edge_overlap = other | {"account": "account", "ranges": [(996, 999)]}
+assert "windows" not in sample_attempt(run, {"run": one_point, "other": edge_overlap})
+crossing_snapshot = snapshot(1104, 14)
+crossing_snapshot["windows"]["5h"]["reset_at"] = 1500
+crossing = run | {"quota_after": crossing_snapshot}
+assert "5h" not in sample_attempt(crossing, {"run": profile})["windows"]
 no_wrapper = {k: v for k, v in run.items() if not k.startswith("quota_")}
 same = sample_attempt(no_wrapper, {"run": profile})
 assert same["windows"]["5h"] == {"delta_pp": 2, "source": "session", "observed_at": 1095}

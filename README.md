@@ -304,3 +304,7 @@ The hard provider denial returns 3. An explicitly configured elapsed
 CC_ESTIMATE_DEADLINE_EPOCH returns 8. A future estimated deadline miss is
 a warning. CC_ESTIMATE_TASK_CLASS optionally labels a task for later
 analysis and for model-specific ETA once enough examples exist.
+
+
+For the chronological evaluator, optional ETA shadow output, and bounded
+Claude quota readings, see [estimator calibration](docs/estimator-calibration.md).

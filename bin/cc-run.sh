@@ -142,7 +142,8 @@ fi
 # Best-effort: нотифікація ніколи не валить ран і не чіпає код виходу.
 # notify — afterflight (ok/fail/session), зі звуком, однорядковий телеграф.
 # notify_silent — preflight (старт, <pre>-таблиця), без звуку.
-notify(){ [ -f "$NOTIFY" ] || return 0; { echo "--- notify $(date -u +%FT%TZ) ---"; sh "$NOTIFY" "$*"; echo "notify rc=$?"; } >>"$D/notify-debug.log" 2>&1 || true; }
+notify(){ [ -f "$NOTIFY" ] || return 0; { echo "--- notify $(date -u +%FT%TZ) ---"; sh "$NOTIFY" "$*${V3_FACT:+
+<pre>$V3_FACT</pre>}"; echo "notify rc=$?"; } >>"$D/notify-debug.log" 2>&1 || true; }
 notify_silent(){ [ -f "$NOTIFY" ] || return 0; { echo "--- notify_silent $(date -u +%FT%TZ) ---"; sh "$NOTIFY" "$1" silent; echo "notify_silent rc=$?"; } >>"$D/notify-debug.log" 2>&1 || true; }
 # Екранування під HTML parse_mode Telegram (див. cc-notify.sh).
 esc(){ printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
@@ -160,18 +161,24 @@ fail_reason(){
 # Пре-фліт оцінка перед спавном — у лог і в стартову нотифікацію (best-effort).
 ESTIMATE_SH="$BIN/cc-estimate.sh"
 UTIL5H_BEFORE=""; UTIL7D_BEFORE=""; UTILSRC_BEFORE=""
-if cc_v3_begin "$D" "$BACKEND" "$MODEL" "$ID"; then
-  PF_HTML=$(cc_v3_render "$V3_PATH")
-  printf '%s\n' "$PF_HTML" > "$D/preflight.log"
+PF_HTML=""
+stop_if_denied(){
   if STOP_CODE=$(cc_v3_stop_code); then
     OUTCOME=deferred
     [ "$STOP_CODE" != 8 ] || OUTCOME=blocked
     cc_v3_finish "$D" "$OUTCOME" "$STOP_CODE"
     echo "$STOP_CODE" > "$D/exit_code"
-    notify "⛔ $TAG · запуск призупинено · <code>$ID</code>
+    REASON="провайдер призупинив запуски"
+    [ "$STOP_CODE" != 8 ] || REASON="вказаний дедлайн минув"
+    notify "⛔ $TAG · $REASON · <code>$ID</code>
 $PF_HTML"
     exit "$STOP_CODE"
   fi
+}
+if cc_v3_begin "$D" "$BACKEND" "$MODEL" "$ID"; then
+  PF_HTML=$(cc_v3_render "$V3_PATH")
+  printf '%s\n' "$PF_HTML" > "$D/preflight.log"
+  stop_if_denied
   notify_silent "<b>$TAG · старт</b>
 <code>$ID</code>
 $PF_HTML"
@@ -197,6 +204,7 @@ $PF_HTML"
   fi
 fi
 
+stop_if_denied
 if [ "$BACKEND" = "codex" ]; then
   # Codex CLI: немає --settings/outputStyle/--allowedTools, аромат уже
   # впаяний у task.md (той самий task.md, що й для claude). sandbox

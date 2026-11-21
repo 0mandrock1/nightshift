@@ -2,6 +2,10 @@
 # Прогонити всі тести cc-swarm послідовно, звіт у кінці.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
+SUITE_TMP=$(mktemp -d) || exit 1
+trap 'rm -rf "$SUITE_TMP"' EXIT
+# Stub runs must never receive token counts from a concurrently written real Claude transcript.
+export CC_CLAUDE_PROJECTS="$SUITE_TMP/claude-projects"
 # CC_NOTIFY=/bin/true раніше валив `sh /bin/true` (ELF-бінарник як shell-скрипт,
 # рятувало лише `|| true`); тестовий стаб — реальний sh-скрипт, exit 0.
 export CC_NOTIFY=${CC_NOTIFY:-"$HERE/fixtures/notify-null.sh"}

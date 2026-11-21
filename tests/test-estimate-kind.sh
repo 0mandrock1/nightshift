@@ -13,6 +13,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=$(cd "$HERE/../bin" && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# This fixture asserts the legacy VARS2 contract independently of live v3 markers.
+export CC_ESTIMATE_STATE="$TMP/estimator-state" CC_ESTIMATE_V3=0
 FAIL=0
 
 CC_USAGE_CLI="$HERE/fixtures/usage-cli-stub.js"

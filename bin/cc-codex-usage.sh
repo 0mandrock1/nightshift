@@ -24,7 +24,7 @@ try:
     p.stdin.write("".join(json.dumps(request, separators=(",", ":")) + "\n" for request in requests).encode())
     sel = selectors.DefaultSelector()
     sel.register(p.stdout, selectors.EVENT_READ)
-    deadline = time.monotonic() + float(os.environ.get("CC_CODEX_USAGE_TIMEOUT", "6"))
+    deadline = time.monotonic() + float(os.environ.get("CC_CODEX_USAGE_TIMEOUT", "10"))
     result = None
     buffer = b""
     while time.monotonic() < deadline and result is None:
