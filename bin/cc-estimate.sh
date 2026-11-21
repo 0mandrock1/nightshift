@@ -82,7 +82,7 @@ if [ "$COMPARE" = 0 ] && [ "$LANES" = 1 ] && { [ "$OUTPUT_JSON" = 1 ] || cc_v3_e
   [ "$COMPACT_HTML" = 0 ] || V3_FORMAT=html
   [ "$OUTPUT_JSON" = 0 ] || V3_FORMAT=json
   CC_RUNS="$CC_RUNS" python3 "$BIN/cc-estimate-v3.py" predict --backend "$BACKEND" "--model=$MODEL" \
-    "--effort=${CC_CODEX_EFFORT:-}" "--id=$RUN_ID" --claude-quota --format "$V3_FORMAT" && exit 0
+    "--effort=${CC_CODEX_EFFORT:-}" "--id=$RUN_ID" --task "$TASK" --claude-quota --format "$V3_FORMAT" && exit 0
   [ "$OUTPUT_JSON" = 0 ] || exit 1
 fi
 if [ "$OUTPUT_JSON" = 1 ]; then

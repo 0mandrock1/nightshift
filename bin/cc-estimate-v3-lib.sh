@@ -32,7 +32,7 @@ cc_v3_begin(){
   shift 5
   python3 "$BIN/cc-estimate-v3.py" predict --backend "$v3_backend" "--model=$v3_model" \
     "--effort=${CC_CODEX_EFFORT:-}" "--id=$v3_id" "--wrapper-pid=$$" --attempt --claude-quota \
-    --output "$v3_dir/preflight-v3.json" "$@" >/dev/null 2>>"$v3_dir/preflight-error.log" || return 1
+    --task "$v3_dir/task.md" --output "$v3_dir/preflight-v3.json" "$@" >/dev/null 2>>"$v3_dir/preflight-error.log" || return 1
   V3_PATH="$v3_dir/preflight-v3.json"
 }
 

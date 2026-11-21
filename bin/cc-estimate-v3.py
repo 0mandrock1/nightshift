@@ -8,6 +8,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import signal
 import sqlite3
 import statistics
@@ -68,6 +69,7 @@ def model_key(backend, model):
 
 
 def snapshot(backend, claude_option=None):
+    started = time.monotonic()
     if backend == "codex":
         command = ["sh", str(BIN / "cc-codex-usage.sh"), "--json"]
         env = os.environ | {"CC_CODEX_USAGE_BIN": os.environ.get("CC_CODEX_USAGE_BIN", "codex" if os.environ.get("CC_CODEX_BIN", "codex") == "codex" else "false")}
@@ -78,6 +80,7 @@ def snapshot(backend, claude_option=None):
             command.append(claude_option)
         env = os.environ
     data = {}
+    failure = "provider_read_failed"
     try:
         with subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               start_new_session=True) as proc:
@@ -95,6 +98,9 @@ def snapshot(backend, claude_option=None):
                 value = json.loads(output)
                 if isinstance(value, dict):
                     data = value
+                    failure = None
+    except subprocess.TimeoutExpired:
+        failure = "timeout"
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
     now = time.time()
@@ -114,7 +120,8 @@ def snapshot(backend, claude_option=None):
     return {"backend": backend, "source": source, "observed_at": observed, "fresh": fresh, "windows": windows,
             "sample_id": data.get("sampleId"),
             **({"probe_end": data["probeEnd"]} if "probeEnd" in data else {}),
-            **({"probe_error": data["probeError"]} if "probeError" in data else {}),
+            "probe_elapsed_seconds": round(time.monotonic() - started, 3),
+            "probe_error": data.get("probeError") or failure,
             "plan_type": data.get("planType"),
             "ordinary_usage_allowed": allowed if type(allowed) is bool else None}
 
@@ -236,6 +243,19 @@ def policy(quotas, deadline, eta, now, quota_forecast=None):
     return {"action": "allow", "reason": "no_observed_limit"}
 
 
+def task_class_from_file(path):
+    if path:
+        try:
+            with path.open(encoding="utf-8", errors="replace") as task:
+                for line in task.read(2048).splitlines()[:12]:
+                    match = re.fullmatch(r"(?:# |<!-- )?Task class: ([a-z][a-z0-9_-]{0,31})(?: -->)?", line.strip(), re.I)
+                    if match:
+                        return match[1].lower()
+        except OSError:
+            pass
+    return None
+
+
 def plan_steps(path, mode, backend):
     steps = []
     for line in path.read_text().splitlines():
@@ -249,7 +269,7 @@ def plan_steps(path, mode, backend):
         model = fields[3] or (("" if selected == "codex" else "sonnet") if mode == "chain" else "haiku")
         if mode == "swarm" and model.startswith("local:"):
             selected = "local"
-        steps.append((fields[0], selected, model, False))
+        steps.append((fields[0], selected, model, False, pathlib.Path(fields[2 if mode == "chain" else 1])))
     return steps
 
 
@@ -259,9 +279,9 @@ def estimate(args):
     rows = select_history(state, now)
     samples = quota_history(state, rows)
     specifications = plan_steps(args.plan, args.mode, args.backend) if args.plan else [
-        (args.id or "run", args.backend, args.model, False)]
+        (args.id or "run", args.backend, args.model, False, getattr(args, "task", None))]
     if args.plan and args.mode == "swarm" and args.fanin:
-        specifications.append(("fan-in", args.backend, "sonnet", True))
+        specifications.append(("fan-in", args.backend, "sonnet", True, pathlib.Path(str(args.plan)+".fanin")))
     quotas, steps = {}, []
     attempt_id = str(uuid.uuid4()) if args.attempt else None
     meter = state / "claude-meter.sqlite3"
@@ -273,8 +293,8 @@ def estimate(args):
             tracked = True
         except (OSError, sqlite3.Error) as error:
             print(f"Claude quota attempt registration: {error}", file=sys.stderr)
-    shadow = os.environ.get("CC_ESTIMATE_ETA_SHADOW") == "1"
-    for name, backend, requested, fanin in specifications:
+    shadow = os.environ.get("CC_ESTIMATE_ETA_SHADOW", "1") == "1"
+    for name, backend, requested, fanin, task_path in specifications:
         if backend not in ("claude", "codex", "local"):
             raise ValueError("invalid backend")
         if backend not in quotas and backend != "local" and (backend == "codex" or args.claude_quota):
@@ -287,12 +307,14 @@ def estimate(args):
         effort = (args.effort or None) if backend == "codex" else None
         mode = ("chain_step" if args.mode == "chain" else "fanin" if fanin else "lane") if args.plan else (
             os.environ.get("CC_TELEMETRY_KIND") or "run")
+        task_class = args.task_class or task_class_from_file(task_path)
         step = {"name": name, "backend": backend, "requested_model": requested, "model": model,
-                "effort": effort, "fanin": fanin, "mode": mode,
-                "eta": forecast(rows, backend, model, effort, now, args.task_class)}
+                "effort": effort, "fanin": fanin, "mode": mode, "task_class": task_class,
+                "eta": forecast(rows, backend, model, effort, now, task_class)}
         if shadow and backend in SHADOW_RECENT:
-            step["eta_shadow"] = estimate_eta.candidate(
-                rows, backend, model, effort, now, args.task_class, mode, recent=SHADOW_RECENT[backend])
+            step["eta_shadow"] = estimate_eta.measured_candidate(
+                rows, backend, model, effort, now, task_class, step["eta"]) or estimate_eta.candidate(
+                rows, backend, model, effort, now, task_class, mode, recent=SHADOW_RECENT[backend])
         steps.append(step)
     if not steps:
         raise ValueError("empty plan")
@@ -321,7 +343,7 @@ def estimate(args):
             codex_predictions.append(tip)
     quota_forecast = estimate_quota.aggregate(codex_predictions) if codex_predictions else {"status": "unsupported"}
     result = {"schema": 3, "mode": args.mode, "generated_at": now, "eta": eta, "steps": steps, "quotas": quotas,
-              "quota_forecast": quota_forecast, "deadline_epoch": args.deadline, "task_class": args.task_class,
+              "quota_forecast": quota_forecast, "deadline_epoch": args.deadline, "task_class": steps[0]["task_class"] if not args.plan else args.task_class,
               "decision": policy(quotas, args.deadline, eta, time.time(), quota_forecast)}
     if attempt_id:
         result.update(attempt_id=attempt_id, claude_meter_tracked=tracked)
@@ -411,7 +433,14 @@ def render(data, markup=True):
 
     headline, *eta_details = eta_lines
     if eta_basis:
-        eta_details.insert(0, f"{eta_basis} · попередньо")
+        note = f"{eta_basis} · попередньо"
+        if eta.get("sources", {}).get("mtime_proxy", 0)*2 > eta.get("n", 0):
+            note += " · переважно старі часові мітки"
+        if not eta.get("steps_total") and data["steps"][0].get("effort") and "effort" not in eta.get("scope", ""):
+            note += " · спільна історія для різних effort"
+        eta_details.insert(0, note)
+    if len(data["steps"]) == 1 and data["steps"][0].get("task_class"):
+        eta_details.append("Клас задачі · " + data["steps"][0]["task_class"])
     card = ["<b>" + escape(headline) + "</b>", escape(label), *map(escape, eta_details)]
     if quota_lines:
         card.extend(["", "<b>Поточна квота</b>", *map(escape, quota_lines)])
@@ -585,6 +614,7 @@ def main():
     p.add_argument("--mode", choices=("run", "chain", "swarm"), default="run")
     p.add_argument("--maxpar", type=lambda value: max(1, int(value)), default=1)
     p.add_argument("--deadline", type=timestamp)
+    p.add_argument("--task", type=pathlib.Path)
     p.add_argument("--task-class", default=os.environ.get("CC_ESTIMATE_TASK_CLASS") or None)
     p.add_argument("--fanin", action="store_true")
     p.add_argument("--claude-quota", action="store_true")
