@@ -79,4 +79,5 @@ def measured_candidate(rows, backend, model, effort, cutoff, task_class, baselin
     return {"status": "provisional", "scope": "measured_cohort", "n": len(values),
             "p50_seconds": round(typical, 1),
             "p90_seconds": round(max(upper, quantile(values, .9), typical), 1),
-            "sources": {"wrapper_monotonic": len(values)}}
+            "sources": {"wrapper_monotonic": len(values)},
+            "observed_seconds": [round(min(values), 1), round(max(values), 1)]}

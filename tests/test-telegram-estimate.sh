@@ -8,7 +8,8 @@ trap 'rm -rf "$TMP"' EXIT
 cat > "$TMP/estimate.json" <<'JSON'
 {
   "eta": {"n": 10, "p50_seconds": 60, "p90_seconds": 180},
-  "steps": [{"backend": "codex", "model": "demo<&", "effort": null}],
+  "steps": [{"backend": "codex", "model": "demo<&", "effort": null,
+    "eta_shadow": {"observed_seconds":[26,45],"n":3}}],
   "quotas": {"codex": {"source": "api", "windows": {
     "5h": {"used_percent": 50, "usable": true},
     "7d": {"used_percent": null, "usable": false}
@@ -23,6 +24,7 @@ JSON
 python3 "$BIN/cc-estimate-v3.py" render "$TMP/estimate.json" > "$TMP/card"
 grep -Fx '<blockquote><b>ETA 1.0 хв · верх 3.0 хв</b>' "$TMP/card"
 grep -Fx 'codex/demo&lt;&amp;' "$TMP/card"
+grep -Fx 'Фактичні тривалості · 26–45 с · n=3 · рівень міркування' "$TMP/card"
 grep -Fx '<b>Поточна квота</b>' "$TMP/card"
 grep -F '5h &lt;1, верх 2 в.п.' "$TMP/card"
 grep -Fx '⚠️ ризик вийти за дедлайн' "$TMP/card"

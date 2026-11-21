@@ -439,8 +439,15 @@ def render(data, markup=True):
         if not eta.get("steps_total") and data["steps"][0].get("effort") and "effort" not in eta.get("scope", ""):
             note += " · спільна історія для різних effort"
         eta_details.insert(0, note)
-    if len(data["steps"]) == 1 and data["steps"][0].get("task_class"):
-        eta_details.append("Клас задачі · " + data["steps"][0]["task_class"])
+    if len(data["steps"]) == 1:
+        step = data["steps"][0]
+        if step.get("task_class"):
+            eta_details.append("Клас задачі · " + step["task_class"])
+        measured = step.get("eta_shadow") or {}
+        if measured.get("observed_seconds"):
+            low, high = measured["observed_seconds"]
+            basis = "клас задачі" if step.get("task_class") else "рівень міркування"
+            eta_details.append(f"Фактичні тривалості · {low:.0f}–{high:.0f} с · n={measured['n']} · {basis}")
     card = ["<b>" + escape(headline) + "</b>", escape(label), *map(escape, eta_details)]
     if quota_lines:
         card.extend(["", "<b>Поточна квота</b>", *map(escape, quota_lines)])
