@@ -72,7 +72,7 @@ def measured_candidate(rows, backend, model, effort, cutoff, task_class, baselin
               and cutoff - 60*86400 <= max(r["finished_at"], r.get("recorded_at") or r["finished_at"]) < cutoff]
     cohort.sort(key=lambda r: r["finished_at"], reverse=True)
     values = [r["seconds"] for r in cohort[:24]]
-    if len(values) < 3:
+    if len(values) < 3 or quantile(values, .9) > 3 * quantile(values, .1):
         return None
     weight = len(values) / (len(values) + 3)
     typical = math.exp(weight*math.log(quantile(values, .5)) + (1-weight)*math.log(center))

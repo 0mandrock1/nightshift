@@ -75,9 +75,9 @@ def snapshot(backend, claude_option=None):
         env = os.environ | {"CC_CODEX_USAGE_BIN": os.environ.get("CC_CODEX_USAGE_BIN", "codex" if os.environ.get("CC_CODEX_BIN", "codex") == "codex" else "false")}
     else:
         cli = os.environ.get("CC_USAGE_CLI", "/root/projects/tg_bots/mandrock0_cc_bot/usage-cli.js")
-        command = ["node", cli, "--ratelimit-json"]
-        if claude_option:
-            command.append(claude_option)
+        # Default previews reuse the local account reading. Its cold-start
+        # inference cost and latency belong only to explicitly measured runs.
+        command = ["node", cli, "--ratelimit-json", claude_option or "--cache-only"]
         env = os.environ
     data = {}
     failure = "provider_read_failed"

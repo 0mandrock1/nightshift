@@ -302,9 +302,14 @@ state. CC_ESTIMATE_V3=0 restores the legacy wrapper path.
 CC_ESTIMATE_V3_ENFORCE=0 records provider/due-time decisions in shadow mode.
 The hard provider denial returns 3. An explicitly configured elapsed
 CC_ESTIMATE_DEADLINE_EPOCH returns 8. A future estimated deadline miss is
-a warning. CC_ESTIMATE_TASK_CLASS optionally labels a task for later
-analysis and for model-specific ETA once enough examples exist.
+a warning. Use `CC_ESTIMATE_TASK_CLASS` or add a `Task class: review` line near the
+top of the task file to distinguish different kinds of work. The environment
+overrides the file label. Predictions use the existing ETA by default and
+record `eta_shadow` for comparison. Set `CC_ESTIMATE_ETA_SHADOW=0` to
+disable that calculation.
 
-
-For the chronological evaluator, optional ETA shadow output, and bounded
-Claude quota readings, see [estimator calibration](docs/estimator-calibration.md).
+Claude preflight and afterflight show available cached readings. Independent
+before/after probes are opt-in with `CC_ESTIMATE_CLAUDE_PROBES=1` and require
+the compatible `usage-cli.js`. They may time out, and the resulting account
+delta remains unattributed to any single run. See
+[estimator calibration](docs/estimator-calibration.md) for the evaluation.

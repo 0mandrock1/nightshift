@@ -62,5 +62,7 @@ base = {"p50_seconds": 480, "p90_seconds": 900}
 eta = mod.estimate_eta.measured_candidate(rows, "codex", "gpt-6-luna", "low", 1003, "review", base)
 assert eta["p50_seconds"] == 120 and eta["p90_seconds"] == 900 and eta["n"] == 3, eta
 assert mod.estimate_eta.measured_candidate(rows, "codex", "gpt-6-luna", "low", 1003, "analysis", base) is None
+heterogeneous = rows + [test_row | {"seconds": 800}]
+assert mod.estimate_eta.measured_candidate(heterogeneous, "codex", "gpt-6-luna", "low", 1003, "review", base) is None
 PY
 echo 'OK: task label and measured ETA cohort'
