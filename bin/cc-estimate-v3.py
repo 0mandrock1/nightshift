@@ -282,20 +282,23 @@ def render(data, markup=True):
                        for s in data["steps"][:3])
     if len(data["steps"]) > 3:
         label += f" · +{len(data['steps']) - 3}"
-    lines = [label]
+    eta_lines, quota_lines, forecast_lines, notices = [], [], [], []
+    forecast_title = None
+    eta_basis = None
+    plain_note = []
     if eta["p50_seconds"] is None:
-        lines.append("ETA н/д · історія " + str(eta.get("n", sum(s["eta"]["n"] for s in data["steps"]))))
+        eta_lines.append("ETA н/д · історія " + str(eta.get("n", sum(s["eta"]["n"] for s in data["steps"]))))
     else:
         upper = eta.get("p90_seconds", eta.get("upper_seconds"))
-        suffix = f" · n={eta['n']}; попередньо" if "n" in eta else " · сума/розклад кроків; попередньо"
-        lines.append(f"ETA {eta['p50_seconds']/60:.1f} хв · верх {upper/60:.1f} хв{suffix}")
+        eta_basis = f"n={eta['n']}" if "n" in eta else "сума/розклад кроків"
+        eta_lines.append(f"ETA {eta['p50_seconds']/60:.1f} хв · верх {upper/60:.1f} хв")
     for backend, q in data["quotas"].items():
         windows = []
         for key in WINDOWS:
             w = q["windows"][key]
             p = w["used_percent"]
             windows.append(f"{key} {p:g}%" + ("" if w["usable"] else " (неактуально)") if p is not None else f"{key} н/д")
-        lines.append(f"{backend} " + " · ".join(windows) + " · " + q["source"])
+        quota_lines.append(f"{backend} " + " · ".join(windows) + " · " + q["source"])
     tip = data.get("quota_forecast") or {}
     if tip.get("backend") == "codex":
         parts = []
@@ -309,27 +312,49 @@ def render(data, markup=True):
             else:
                 parts.append(f"{key} · {window['n']}/{estimate_quota.MIN_SAMPLES} вимірів")
         if parts:
-            label = "Витрати Codex, сума кроків" if "steps" in tip else "Витрати Codex, оцінка"
-            lines.extend([label, *parts])
+            forecast_title = "Квота Codex · сума кроків" if "steps" in tip else "Прогноз зміни квоти Codex"
+            forecast_lines = parts
         else:
-            lines.append("Оцінка витрат Codex недоступна · провайдер не підтвердив тариф")
+            forecast_lines.append("Оцінка витрат Codex недоступна · провайдер не підтвердив тариф")
     elif any(step["backend"] == "claude" for step in data["steps"]):
-        lines.append("Для Claude показано поточну квоту")
+        plain_note.append("Для Claude показано поточну квоту")
     if data["decision"]["action"] != "allow":
         descriptions = {"quota_unavailable": "поточна квота недоступна", "codex_provider_denied": "Codex призупинив звичайні запуски",
                         "current_quota_high": "залишок квоти малий", "deadline_at_risk": "ризик вийти за дедлайн",
                         "deadline_elapsed": "вказаний дедлайн минув",
                         "forecast_quota_at_risk": "за верхньою оцінкою можливе вичерпання квоти"}
         reasons = data["decision"].get("warnings", [data["decision"]["reason"]])
-        lines.extend(descriptions.get(reason, reason) for reason in reasons)
+        notices.extend(descriptions.get(reason, reason) for reason in reasons)
     retry_at = data["decision"].get("retry_at")
     if retry_at:
         from datetime import datetime
         from zoneinfo import ZoneInfo
         stamp = datetime.fromtimestamp(retry_at, ZoneInfo("Europe/Kyiv"))
-        lines.append("Повтор після " + stamp.strftime("%d.%m %H:%M") + " за Києвом")
-    output = "\n".join(lines)
-    print("<pre>\n" + html.escape(output, quote=False) + "\n</pre>" if markup else output)
+        notices.append("Повтор після " + stamp.strftime("%d.%m %H:%M") + " за Києвом")
+    if not markup:
+        if eta_basis:
+            eta_lines[0] += f" · {eta_basis}; попередньо"
+        forecast = ([forecast_title] if forecast_title else []) + forecast_lines
+        print("\n".join([label, *eta_lines, *quota_lines, *forecast, *plain_note, *notices]))
+        return
+
+    def escape(line):
+        return html.escape(line, quote=False)
+
+    headline, *eta_details = eta_lines
+    if eta_basis:
+        eta_details.insert(0, f"{eta_basis} · попередньо")
+    card = ["<b>" + escape(headline) + "</b>", escape(label), *map(escape, eta_details)]
+    if quota_lines:
+        card.extend(["", "<b>Поточна квота</b>", *map(escape, quota_lines)])
+    if forecast_lines:
+        card.extend([""])
+        if forecast_title:
+            card.append("<b>" + escape(forecast_title) + "</b>")
+        card.extend(map(escape, forecast_lines))
+    print("<blockquote>" + "\n".join(card) + "</blockquote>")
+    if notices:
+        print("⚠️ " + "\n".join(map(escape, notices)))
 
 
 def quota_delta(before, after):

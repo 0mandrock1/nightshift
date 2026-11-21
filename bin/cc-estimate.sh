@@ -240,13 +240,12 @@ if [ "$COMPACT_HTML" = "1" ]; then
   elif [ -n "$RL_SOURCE" ]; then
     BASIS_H="${BASIS_H} · ${RL_SOURCE}"
   fi
-  printf '<pre>\n'
-  printf 'токени    %s\n' "~${TOK_H}"
-  if [ -n "$RL5_PCT" ]; then printf '5h-вікно  %s\n' "$(bar_pct "$RL5_PCT")"; else printf '5h-вікно  %s\n' "н/д"; fi
-  if [ -n "$RL7_PCT" ]; then printf 'тиждень   %s\n' "$(bar_pct "$RL7_PCT")"; else printf 'тиждень   %s\n' "н/д"; fi
-  printf 'хв        %s\n' "~${TOTAL_MIN}"
-  printf 'базис     %s\n' "${BASIS_H}"
-  printf '</pre>'
+  printf '<blockquote><b>ETA ≈%s хв</b>\n' "$TOTAL_MIN"
+  printf 'Токени · ≈%s\n\n<b>Поточна квота</b>\n' "$TOK_H"
+  if [ -n "$RL5_PCT" ]; then printf '5h · %s\n' "$(bar_pct "$RL5_PCT")"; else printf '5h · н/д\n'; fi
+  if [ -n "$RL7_PCT" ]; then printf '7d · %s\n' "$(bar_pct "$RL7_PCT")"; else printf '7d · н/д\n'; fi
+  printf '\n%s' "$BASIS_H" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+  printf '</blockquote>'
   exit 0
 fi
 

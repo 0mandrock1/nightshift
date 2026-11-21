@@ -74,22 +74,21 @@ case "${1:-}" in
     B7=$(bar10 "$PCT7D")
     TOK_H=$(fmt_tokens "$TOKENS")
 
-    OUT="🐝 <b>ПРЕФЛАЙТ · ${LABEL} · $(esc "$ID")</b>"
-    OUT="$OUT
-<pre>
-токени  ~${TOK_H}
-  5h    ${B5}  $(pct_or_dash "$PCT5H")  з CAP5H
-  тижд  ${B7}  $(pct_or_dash "$PCT7D")  з CAP7D
-  час     ~${MINUTES} хв"
+    OUT="🐝 <b>ПРОГНОЗ · ${LABEL} · $(esc "$ID")</b>
+<blockquote><b>ETA ≈$(esc "$MINUTES") хв</b>
+Токени · ≈${TOK_H}"
     if [ "$SINGLE" != "1" ]; then
       OUT="$OUT
-склад   ${LANES}×${TIER} ‖${MAXPAR} + sonnet fan-in"
+Склад · $(esc "$LANES")×$(esc "$TIER") ‖$(esc "$MAXPAR") + sonnet fan-in"
     fi
     OUT="$OUT
-──────────────────────────
-базис   медіана ${BASIS_RUNS} ранів, ±$(pct_or_dash "${BASIS_ERR:-}")
-довіра  ${CONF}
-</pre>"
+
+<b>Оцінка витрат квоти</b>
+5h · ${B5}  $(esc "$(pct_or_dash "$PCT5H")")
+7d · ${B7}  $(esc "$(pct_or_dash "$PCT7D")")
+
+Базис · медіана $(esc "$BASIS_RUNS") ранів · ±$(esc "$(pct_or_dash "${BASIS_ERR:-}")")
+Довіра · $(esc "$CONF")</blockquote>"
     echo "$OUT"
 
     PCT7D_INT=$(awk -v p="$PCT7D" 'BEGIN{printf "%d", p+0}')
