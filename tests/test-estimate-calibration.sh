@@ -157,7 +157,7 @@ jq -e '
 jq -e '.mode=="fanin" and .backend=="claude" and .outcome=="ok" and
   .prediction.steps[0].mode=="fanin"
 ' "$CC_RUNS/calibration-swarm-fanin/attempt-v3.json" >/dev/null
-grep -q 'сума/розклад кроків' "$TEST_NOTIFICATIONS"
+grep -q 'Час плану: .*із запасом 4 хв' "$TEST_NOTIFICATIONS"
 grep -q 'ETA плану н/д · є історія для 2/3 кроків' "$TEST_NOTIFICATIONS"
 grep -q 'Без ETA · b' "$TEST_NOTIFICATIONS"
 echo 'OK: as-of ETA, small samples, independent meter, overlap, mixed chain and swarm fan-in'

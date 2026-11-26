@@ -357,9 +357,6 @@ def estimate(args):
 
 def render_codex_card(data, notices):
     """Telegram view only; the JSON contract and admission policy stay unchanged."""
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
     def esc(value):
         return html.escape(str(value), quote=False)
 
@@ -387,18 +384,11 @@ def render_codex_card(data, notices):
     card.append("")
     if eta["p50_seconds"] is not None:
         upper = eta.get("p90_seconds", eta.get("upper_seconds"))
-        card.append(f"Типово: <b>≈ {duration(eta['p50_seconds'])}</b>")
+        label = "Час плану" if is_plan else "Час"
+        line = f"{label}: <b>≈ {duration(eta['p50_seconds'])}</b>"
         if upper is not None:
-            card.append(f"Із запасом: <b>≈ {duration(upper, upper=True)}</b>")
-        if "n" in eta:
-            note = f"Історія: {eta['n']} ранів · попередньо"
-            if steps[0].get("effort") and "effort" not in eta.get("scope", ""):
-                note += " · різні рівні міркування"
-            if eta.get("sources", {}).get("mtime_proxy", 0)*2 > eta["n"]:
-                note += " · переважно непрямі заміри"
-        else:
-            note = "сума/розклад кроків · не гарантія"
-        card.append(f"<i>{esc(note)}</i>")
+            line += f" · із запасом {duration(upper, upper=True)}"
+        card.append(line)
     elif "steps_covered" in eta:
         card.append(f"<b>ETA плану н/д · є історія для {eta['steps_covered']}/{eta['steps_total']} кроків</b>")
         missing = eta.get("missing_steps", [])
@@ -407,66 +397,42 @@ def render_codex_card(data, notices):
                         + (f" · +{len(missing)-5}" if len(missing) > 5 else ""))
     else:
         card.append("<b>Час поки невідомий</b>")
-        card.append(f"Історія: {eta.get('n', 0)} ранів · потрібно щонайменше 5")
-    if not is_plan:
-        step = steps[0]
-        measured = step.get("eta_shadow") or {}
-        if measured.get("observed_seconds"):
-            low, high = measured["observed_seconds"]
-            card.append(f"<i>Заміри: {low:.0f}–{high:.0f} с · {measured['n']} ранів</i>")
 
     tip = data.get("quota_forecast") or {}
     forecasts = tip.get("windows", {})
     names = {"5h": "5 год", "7d": "7 днів"}
-    for backend, quota in data.get("quotas", {}).items():
-        card.extend(["", f"<b>◈ Ліміти {esc(backend.capitalize())} на старті</b>"])
+    quotas = data.get("quotas", {})
+    backends = list(quotas)
+    if tip.get("backend") == "codex" and "codex" not in quotas:
+        backends.append("codex")
+    for backend in backends:
+        quota = quotas.get(backend, {})
+        card.extend(["", f"<b>◈ {esc(backend.capitalize())} · вільний ліміт"
+                    + (" (зараз → після)" if backend == "codex" else "") + "</b>"])
         for key in WINDOWS:
             w = quota.get("windows", {}).get(key, {})
             p = w.get("used_percent")
-            prefix = names[key]
-            if p is None:
-                card.append(f"{prefix}: немає даних")
-                continue
-            if not w.get("usable"):
-                card.append(f"{prefix}: {p:g}% використано · неактуально")
-                continue
-            left = max(0, 100 - p)
-            cells = min(10, max(0, math.floor(left / 10 + .5)))
-            bar = "▰" * cells + "▱" * (10 - cells)
-            card.append(f"{prefix}: {bar} <b>{left:g}% вільно</b>" +
-                        (f" ({p:g}% використано)" if p > 100 else ""))
-            if w.get("reset_at"):
-                reset = datetime.fromtimestamp(w["reset_at"], ZoneInfo("Europe/Kyiv"))
-                card.append(f"<i>↻ {reset:%d.%m %H:%M} · Київ</i>")
-
-    if tip.get("backend") == "codex":
-        card.extend(["", "<b>◈ Скільки ліміту закласти</b>"])
-        if not forecasts:
-            card.append("Прогноз недоступний: невідомий тариф")
-        for key in WINDOWS:
-            w = forecasts.get(key)
-            if not w:
-                continue
-            if "typical_pp" in w:
-                typical, reserve = w["typical_pp"], w["planning_upper_pp"]
-                cost = f"приблизно {typical:g}% ліміту" if typical else "зазвичай без видимої зміни"
-                card.append(f"<b>{names[key]}</b>: {cost}")
-                card.append(f"Резерв на весь запуск: <b>{reserve:g}%</b> ліміту.")
-                current = data.get("quotas", {}).get("codex", {}).get("windows", {}).get(key, {})
-                if current.get("usable") and current.get("used_percent") is not None:
-                    left = max(0, 100 - current["used_percent"])
-                    if reserve >= left:
-                        card.append("⚠ Запасу ліміту може не вистачити.")
-                    else:
-                        after = max(0, left - typical)
-                        cautious = max(0, left - reserve)
-                        card.append(f"Залишиться ≈{after:.10g}% (якщо витратити резерв: {cautious:.10g}%)")
-            elif "steps_covered" in w:
-                card.append(f"{names[key]}: мало даних · {w['steps_covered']}/{tip['steps']} кроків")
+            f = forecasts.get(key, {}) if backend == "codex" else {}
+            usable = w.get("usable") and p is not None
+            left = max(0, 100-p) if usable else None
+            balance = f"{left:g}%" if usable else "неактуально" if p is not None else "немає даних"
+            line = f"{names[key]}: <b>{balance}"
+            if "typical_pp" in f:
+                typical, reserve = f["typical_pp"], f["planning_upper_pp"]
+                if usable:
+                    line += f" → ≈{max(0, left-typical):.10g}%</b>"
+                else:
+                    line += "</b>"
+                line += f" · резерв {reserve:g}%"
+                if usable and reserve >= left:
+                    line += " ⚠ може не вистачити"
             else:
-                card.append(f"{names[key]}: мало даних · {w['n']}/{estimate_quota.MIN_SAMPLES} замірів")
-        if any("typical_pp" in w for w in forecasts.values()):
-            card.append("<i>Прогноз за лічильником акаунта. Без урахування скидання лімітів та інших ранів.</i>")
+                line += "</b>"
+                if backend == "codex":
+                    line += " · прогноз н/д"
+            card.append(line)
+        if backend == "codex" and any("typical_pp" in w for w in forecasts.values()):
+            card.append("<i>Резерв = витрата із запасом; без скидання й інших ранів.</i>")
     if notices:
         action = data["decision"]["action"]
         heading = "Запуск відкладено" if action == "defer" else "Запуск заблоковано" if action == "block" else "Увага"
