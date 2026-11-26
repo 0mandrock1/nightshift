@@ -385,7 +385,7 @@ def render_codex_card(data, notices):
     if eta["p50_seconds"] is not None:
         upper = eta.get("p90_seconds", eta.get("upper_seconds"))
         label = "Час плану" if is_plan else "Час"
-        line = f"{label}: <b>≈ {duration(eta['p50_seconds'])}</b>"
+        line = f"{label}: <b>{duration(eta['p50_seconds'])}</b>"
         if upper is not None:
             line += f" · максимум {duration(upper, upper=True)}"
         card.append(line)
@@ -409,7 +409,7 @@ def render_codex_card(data, notices):
         quota = quotas.get(backend, {})
         if backend == "codex":
             suffix = " Codex" if len(backends) > 1 else ""
-            card.extend(["", f"<b>{title} · прогноз</b> лімітів{suffix}"])
+            card.extend(["", f"<b>🔋 {title} · прогноз</b> лімітів{suffix}"])
         else:
             card.extend(["", f"<b>◈ {esc(backend.capitalize())} · вільний ліміт</b>"])
         for key in WINDOWS:
@@ -422,11 +422,14 @@ def render_codex_card(data, notices):
             line = f"{names[key]}: <b>{balance}"
             if "typical_pp" in f:
                 typical, reserve = f["typical_pp"], f["planning_upper_pp"]
+                line = f"{names[key]}: <b>{typical:g}%</b>"
                 if usable:
-                    line += f" → ≈{max(0, left-typical):.10g}%</b>"
+                    line += f" ({left:g}% → {max(0, left-typical):.10g}%)"
+                line += f" · максимум <b>{reserve:g}%</b>"
+                if usable:
+                    line += f" ({left:g}% → {max(0, left-reserve):.10g}%)"
                 else:
-                    line += "</b>"
-                line += f" · максимум {reserve:g}%"
+                    line += f" · залишок: {balance}"
                 if usable and reserve >= left:
                     line += " ⚠ може не вистачити"
             else:
@@ -434,8 +437,6 @@ def render_codex_card(data, notices):
                 if backend == "codex":
                     line += " · прогноз н/д"
             card.append(line)
-        if backend == "codex" and any("typical_pp" in w for w in forecasts.values()):
-            card.append("<i>Максимум — прогноз, не гарантія; без скидання й інших ранів.</i>")
     if notices:
         action = data["decision"]["action"]
         heading = "Запуск відкладено" if action == "defer" else "Запуск заблоковано" if action == "block" else "Увага"
