@@ -26,7 +26,9 @@ grep -Fx 'Типово: <b>≈ 1 хв</b>' "$TMP/card"
 grep -Fx 'Codex · demo&lt;&amp;' "$TMP/card"
 grep -Fx '<i>Заміри: 26–45 с · 3 ранів</i>' "$TMP/card"
 grep -Fx '<b>◈ Ліміти Codex на старті</b>' "$TMP/card"
-grep -F '5 год: <b>≈0.5 в.п.</b> · із запасом 2' "$TMP/card"
+grep -Fx '<b>5 год</b>: приблизно 0.5% ліміту' "$TMP/card"
+grep -Fx 'Резерв на весь запуск: <b>2%</b> ліміту.' "$TMP/card"
+grep -Fx 'Залишиться ≈49.5% (якщо витратити резерв: 48%)' "$TMP/card"
 grep -Fx '• ризик вийти за дедлайн' "$TMP/card"
 grep -Fx 'Із запасом: <b>≈ 3 хв</b>' "$TMP/card"
 grep -Fx '5 год: ▰▰▰▰▰▱▱▱▱▱ <b>50% вільно</b>' "$TMP/card"
@@ -42,6 +44,19 @@ grep -Fx '5 год: мало даних · 1/5 замірів' "$TMP/sparse"
 grep -Fx '<b>⚠ Запуск відкладено</b>' "$TMP/sparse"
 grep -Fx '• Повтор після 26.11 22:42 за Києвом' "$TMP/sparse"
 ! grep -q 'вільно' "$TMP/sparse"
+# Zero is an unobserved change, not free usage. Stale readings cannot yield
+# a projected balance; exhausted windows must warn instead of going negative.
+jq '.quota_forecast.windows["7d"]={typical_pp:0,planning_upper_pp:2,n:9,basis:"model_effort"} |
+    .quotas.codex.windows["7d"]={used_percent:28,usable:true} |
+    .quotas.codex.windows["5h"]={used_percent:99,usable:true}' "$TMP/estimate.json" > "$TMP/zero.json"
+python3 "$BIN/cc-estimate-v3.py" render "$TMP/zero.json" > "$TMP/zero"
+grep -Fx '<b>7 днів</b>: зазвичай без видимої зміни' "$TMP/zero"
+grep -Fx 'Залишиться ≈72% (якщо витратити резерв: 70%)' "$TMP/zero"
+grep -Fx '⚠ Запасу ліміту може не вистачити.' "$TMP/zero"
+! grep -q 'в.п.' "$TMP/zero"
+jq '.quotas.codex.windows["5h"].usable=false' "$TMP/estimate.json" > "$TMP/stale.json"
+python3 "$BIN/cc-estimate-v3.py" render "$TMP/stale.json" > "$TMP/stale"
+! grep -q 'Залишиться' "$TMP/stale"
 sh "$BIN/cc-tg-format.sh" preflight --id 'swarm<&' --tokens 100 --minutes 2 \
   --lanes 2 --tier 'demo<&' --pct5h 1 --pct7d 42 > "$TMP/legacy"
 grep -F 'swarm&lt;&amp;' "$TMP/legacy"
@@ -72,7 +87,7 @@ TEST_REJECT_HTML=1 sh "$BIN/cc-notify-swarm.sh" "$(cat "$TMP/card")" silent
 [ "$(grep -c '^parse_mode=HTML$' "$TEST_REQUESTS")" = 1 ]
 [ "$(grep -c '^disable_notification=true$' "$TEST_REQUESTS")" = 2 ]
 grep -Fx 'Типово: ≈ 1 хв' "$TEST_REQUESTS"
-grep -F '5 год: ≈0.5 в.п. · із запасом 2' "$TEST_REQUESTS"
+grep -Fx '5 год: приблизно 0.5% ліміту' "$TEST_REQUESTS"
 : > "$TEST_REQUESTS"
 sh "$BIN/cc-notify-swarm.sh" 'після рану'
 [ "$(cat "$TEST_REQUESTS")" = 'після рану' ]

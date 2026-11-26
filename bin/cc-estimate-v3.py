@@ -440,25 +440,33 @@ def render_codex_card(data, notices):
                 card.append(f"<i>↻ {reset:%d.%m %H:%M} · Київ</i>")
 
     if tip.get("backend") == "codex":
-        card.extend(["", "<b>◈ Прогноз зміни лічильника Codex</b>"])
+        card.extend(["", "<b>◈ Скільки ліміту закласти</b>"])
         if not forecasts:
-            card.append("Немає прогнозу: тариф не підтверджено")
+            card.append("Прогноз недоступний: невідомий тариф")
         for key in WINDOWS:
             w = forecasts.get(key)
             if not w:
                 continue
             if "typical_pp" in w:
-                typical = f"≈{w['typical_pp']:g}"
-                basis = {"model": "модель", "model_effort": "модель + міркування",
-                         "sum_of_steps": "мін. на крок"}.get(w.get("basis"), "")
-                card.append(f"{names[key]}: <b>{typical} в.п.</b> · із запасом {w['planning_upper_pp']:g}")
-                card.append(f"<i>{basis} · {w['n']} замірів</i>")
+                typical, reserve = w["typical_pp"], w["planning_upper_pp"]
+                cost = f"приблизно {typical:g}% ліміту" if typical else "зазвичай без видимої зміни"
+                card.append(f"<b>{names[key]}</b>: {cost}")
+                card.append(f"Резерв на весь запуск: <b>{reserve:g}%</b> ліміту.")
+                current = data.get("quotas", {}).get("codex", {}).get("windows", {}).get(key, {})
+                if current.get("usable") and current.get("used_percent") is not None:
+                    left = max(0, 100 - current["used_percent"])
+                    if reserve >= left:
+                        card.append("⚠ Запасу ліміту може не вистачити.")
+                    else:
+                        after = max(0, left - typical)
+                        cautious = max(0, left - reserve)
+                        card.append(f"Залишиться ≈{after:.10g}% (якщо витратити резерв: {cautious:.10g}%)")
             elif "steps_covered" in w:
                 card.append(f"{names[key]}: мало даних · {w['steps_covered']}/{tip['steps']} кроків")
             else:
                 card.append(f"{names[key]}: мало даних · {w['n']}/{estimate_quota.MIN_SAMPLES} замірів")
         if any("typical_pp" in w for w in forecasts.values()):
-            card.append("<i>Зміна квоти акаунта, не гарантована витрата рану.</i>")
+            card.append("<i>Прогноз за лічильником акаунта. Без урахування скидання лімітів та інших ранів.</i>")
     if notices:
         action = data["decision"]["action"]
         heading = "Запуск відкладено" if action == "defer" else "Запуск заблоковано" if action == "block" else "Увага"
