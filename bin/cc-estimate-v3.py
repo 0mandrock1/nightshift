@@ -387,7 +387,7 @@ def render_codex_card(data, notices):
         label = "Час плану" if is_plan else "Час"
         line = f"{label}: <b>≈ {duration(eta['p50_seconds'])}</b>"
         if upper is not None:
-            line += f" · із запасом {duration(upper, upper=True)}"
+            line += f" · максимум {duration(upper, upper=True)}"
         card.append(line)
     elif "steps_covered" in eta:
         card.append(f"<b>ETA плану н/д · є історія для {eta['steps_covered']}/{eta['steps_total']} кроків</b>")
@@ -407,8 +407,11 @@ def render_codex_card(data, notices):
         backends.append("codex")
     for backend in backends:
         quota = quotas.get(backend, {})
-        card.extend(["", f"<b>◈ {esc(backend.capitalize())} · вільний ліміт"
-                    + (" (зараз → після)" if backend == "codex" else "") + "</b>"])
+        if backend == "codex":
+            suffix = " Codex" if len(backends) > 1 else ""
+            card.extend(["", f"<b>{title} · прогноз</b> лімітів{suffix}"])
+        else:
+            card.extend(["", f"<b>◈ {esc(backend.capitalize())} · вільний ліміт</b>"])
         for key in WINDOWS:
             w = quota.get("windows", {}).get(key, {})
             p = w.get("used_percent")
@@ -423,7 +426,7 @@ def render_codex_card(data, notices):
                     line += f" → ≈{max(0, left-typical):.10g}%</b>"
                 else:
                     line += "</b>"
-                line += f" · резерв {reserve:g}%"
+                line += f" · максимум {reserve:g}%"
                 if usable and reserve >= left:
                     line += " ⚠ може не вистачити"
             else:
@@ -432,7 +435,7 @@ def render_codex_card(data, notices):
                     line += " · прогноз н/д"
             card.append(line)
         if backend == "codex" and any("typical_pp" in w for w in forecasts.values()):
-            card.append("<i>Резерв = витрата із запасом; без скидання й інших ранів.</i>")
+            card.append("<i>Максимум — прогноз, не гарантія; без скидання й інших ранів.</i>")
     if notices:
         action = data["decision"]["action"]
         heading = "Запуск відкладено" if action == "defer" else "Запуск заблоковано" if action == "block" else "Увага"

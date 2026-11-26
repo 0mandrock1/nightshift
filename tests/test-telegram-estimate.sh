@@ -22,10 +22,10 @@ cat > "$TMP/estimate.json" <<'JSON'
 }
 JSON
 python3 "$BIN/cc-estimate-v3.py" render "$TMP/estimate.json" > "$TMP/card"
-grep -Fx 'Час: <b>≈ 1 хв</b> · із запасом 3 хв' "$TMP/card"
+grep -Fx 'Час: <b>≈ 1 хв</b> · максимум 3 хв' "$TMP/card"
 grep -Fx 'Codex · demo&lt;&amp;' "$TMP/card"
-grep -Fx '<b>◈ Codex · вільний ліміт (зараз → після)</b>' "$TMP/card"
-grep -Fx '5 год: <b>50% → ≈49.5%</b> · резерв 2%' "$TMP/card"
+grep -Fx '<b>Ран · прогноз</b> лімітів' "$TMP/card"
+grep -Fx '5 год: <b>50% → ≈49.5%</b> · максимум 2%' "$TMP/card"
 grep -Fx '7 днів: <b>немає даних</b> · прогноз н/д' "$TMP/card"
 grep -Fx '• ризик вийти за дедлайн' "$TMP/card"
 jq '.eta={n:2,p50_seconds:null,p90_seconds:null} |
@@ -38,15 +38,15 @@ grep -Fx '5 год: <b>неактуально</b> · прогноз н/д' "$TMP
 ! grep -q '→ ≈' "$TMP/sparse"
 grep -Fx '<b>⚠ Запуск відкладено</b>' "$TMP/sparse"
 grep -Fx '• Повтор після 26.11 22:42 за Києвом' "$TMP/sparse"
-! grep -q 'резерв [0-9]' "$TMP/sparse"
+! grep -q 'максимум [0-9]' "$TMP/sparse"
 # Zero is an unobserved change, not free usage. Stale readings cannot yield
 # a projected balance; exhausted windows must warn instead of going negative.
 jq '.quota_forecast.windows["7d"]={typical_pp:0,planning_upper_pp:2,n:9,basis:"model_effort"} |
     .quotas.codex.windows["7d"]={used_percent:28,usable:true} |
     .quotas.codex.windows["5h"]={used_percent:99,usable:true}' "$TMP/estimate.json" > "$TMP/zero.json"
 python3 "$BIN/cc-estimate-v3.py" render "$TMP/zero.json" > "$TMP/zero"
-grep -Fx '7 днів: <b>72% → ≈72%</b> · резерв 2%' "$TMP/zero"
-grep -Fx '5 год: <b>1% → ≈0.5%</b> · резерв 2% ⚠ може не вистачити' "$TMP/zero"
+grep -Fx '7 днів: <b>72% → ≈72%</b> · максимум 2%' "$TMP/zero"
+grep -Fx '5 год: <b>1% → ≈0.5%</b> · максимум 2% ⚠ може не вистачити' "$TMP/zero"
 ! grep -q 'в.п.' "$TMP/zero"
 jq '.quotas.codex.windows["5h"].usable=false' "$TMP/estimate.json" > "$TMP/stale.json"
 python3 "$BIN/cc-estimate-v3.py" render "$TMP/stale.json" > "$TMP/stale"
@@ -80,8 +80,8 @@ export PATH="$TMP/bin:$PATH" CC_NOTIFY_SWARM_ENV="$TMP/environment" TEST_REQUEST
 TEST_REJECT_HTML=1 sh "$BIN/cc-notify-swarm.sh" "$(cat "$TMP/card")" silent
 [ "$(grep -c '^parse_mode=HTML$' "$TEST_REQUESTS")" = 1 ]
 [ "$(grep -c '^disable_notification=true$' "$TEST_REQUESTS")" = 2 ]
-grep -Fx 'Час: ≈ 1 хв · із запасом 3 хв' "$TEST_REQUESTS"
-grep -Fx '5 год: 50% → ≈49.5% · резерв 2%' "$TEST_REQUESTS"
+grep -Fx 'Час: ≈ 1 хв · максимум 3 хв' "$TEST_REQUESTS"
+grep -Fx '5 год: 50% → ≈49.5% · максимум 2%' "$TEST_REQUESTS"
 : > "$TEST_REQUESTS"
 sh "$BIN/cc-notify-swarm.sh" 'після рану'
 [ "$(cat "$TEST_REQUESTS")" = 'після рану' ]
