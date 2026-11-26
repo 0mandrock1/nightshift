@@ -185,7 +185,28 @@ def quantile(values, fraction):
     return values[lo] + (values[hi] - values[lo]) * (pos - lo)
 
 
-def forecast(samples, model, effort, plan, cutoff, *, meter_margin=CODEX_METER_STEP_PP):
+def proxy_window(samples, key, older, effort, plan, cutoff, meter_margin):
+    """Historical proxy from one explicit predecessor. Never authoritative, never a hard maximum."""
+    known = [sample for sample in samples if sample.get("model") == older
+             and sample.get("plan_type") == plan and key in sample["windows"]
+             and (not effort or sample.get("effort") == effort)
+             and cutoff - 60 * 86400 <= sample.get("available_at", math.inf) < cutoff]
+    values = [sample["windows"][key]["delta_pp"] for sample in known]
+    if len(values) < MIN_SAMPLES:
+        return None
+    return {"n": len(values), "basis": "predecessor_family_proxy", "source_models": [older],
+            "proxy_typical_pp": round(quantile(values, .5), 1),
+            "proxy_upper_pp": math.ceil(quantile(values, .9) + meter_margin),
+            "sources": dict(collections.Counter(sample["windows"][key]["source"] for sample in known))}
+
+
+def proxy_marker(windows):
+    models = sorted({m for w in windows for m in w.get("source_models", ())})
+    return {"status": "historical_proxy", "authoritative": False, "shared_account_quota": True,
+            "source_models": models}
+
+
+def forecast(samples, model, effort, plan, cutoff, *, meter_margin=CODEX_METER_STEP_PP, predecessors=()):
     result = {"backend": "codex", "status": "insufficient_history", "windows": {},
               "quantity": "account_meter_delta", "attribution": "unknown"}
     if not plan:
@@ -209,9 +230,17 @@ def forecast(samples, model, effort, plan, cutoff, *, meter_margin=CODEX_METER_S
                        meter_margin_pp=meter_margin,
                        effort_n=len(exact),
                        sources=dict(collections.Counter(sample["windows"][key]["source"] for sample in known)))
+        if "typical_pp" not in win:
+            proxy = next(filter(None, (proxy_window(samples, key, older, effort, plan, cutoff, meter_margin)
+                                       for older in predecessors)), None)
+            if proxy:
+                win = proxy
         result["windows"][key] = win
     if any("typical_pp" in w for w in result["windows"].values()):
         result["status"] = "provisional"
+    proxied = [w for w in result["windows"].values() if "proxy_typical_pp" in w]
+    if proxied:
+        result["proxy"] = proxy_marker(proxied)
     return result
 
 
@@ -222,13 +251,25 @@ def aggregate(step_forecasts):
               "quantity": "sum_of_account_meter_projections", "attribution": "unknown"}
     for key in WINDOW_MINUTES:
         valid = [s["windows"][key] for s in step_forecasts if "typical_pp" in s["windows"].get(key, {})]
+        proxied = [s["windows"][key] for s in step_forecasts if "proxy_typical_pp" in s["windows"].get(key, {})]
         tip = {"steps_covered": len(valid)}
         if len(valid) == len(step_forecasts):
             tip.update(typical_pp=round(sum(w["typical_pp"] for w in valid), 1),
                        planning_upper_pp=sum(w["planning_upper_pp"] for w in valid),
                        n=min(w["n"] for w in valid), basis="sum_of_steps")
             result["status"] = "provisional"
+        elif proxied and len(valid) + len(proxied) == len(step_forecasts):
+            # Exact steps contribute their own estimates; proxy steps keep the sum a proxy.
+            parts = valid + proxied
+            tip.update(proxy_typical_pp=round(sum(w.get("typical_pp", w.get("proxy_typical_pp")) for w in parts), 1),
+                       proxy_upper_pp=sum(w.get("planning_upper_pp", w.get("proxy_upper_pp")) for w in parts),
+                       n=min(w["n"] for w in parts), basis="sum_of_steps_proxy",
+                       source_models=sorted({m for w in proxied for m in w["source_models"]}),
+                       proxy_steps=len(proxied), steps_covered=len(parts))
         result["windows"][key] = tip
+    proxied_windows = [w for w in result["windows"].values() if "proxy_typical_pp" in w]
+    if proxied_windows:
+        result["proxy"] = proxy_marker(proxied_windows)
     return result
 
 

@@ -315,15 +315,20 @@ def estimate(args):
             step["eta_shadow"] = estimate_eta.measured_candidate(
                 rows, backend, model, effort, now, task_class, step["eta"]) or estimate_eta.candidate(
                 rows, backend, model, effort, now, task_class, mode, recent=SHADOW_RECENT[backend])
+        if backend == "codex" and step["eta"]["p50_seconds"] is None:
+            found = estimate_eta.fallback(rows, backend, model, effort, now, task_class)
+            if found:
+                step["eta_fallback"] = found | {"strict_exact_n": step["eta"]["n"]}
         steps.append(step)
     if not steps:
         raise ValueError("empty plan")
     eta = steps[0]["eta"]
+    eta_fallback = steps[0].get("eta_fallback") if not args.plan else None
     if args.plan:
         missing = [s["name"] for s in steps if s["eta"]["p50_seconds"] is None]
         eta = {"status": "insufficient_history", "p50_seconds": None, "upper_seconds": None,
                "steps_covered": len(steps) - len(missing), "steps_total": len(steps), "missing_steps": missing}
-        if not missing:
+        def schedule(pick):
             serial = [s for s in steps if args.mode == "chain" or s["fanin"]]
             parallel = [s for s in steps if s not in serial]
             values = {}
@@ -331,20 +336,37 @@ def estimate(args):
                 lanes = [0.0] * min(args.maxpar, max(1, len(parallel)))
                 for step in parallel:
                     i = min(range(len(lanes)), key=lanes.__getitem__)
-                    lanes[i] += step["eta"][key]
-                values[name] = round(max(lanes) + sum(s["eta"][key] for s in serial), 1)
-            eta.update(status="schedule_heuristic", **values)
+                    lanes[i] += pick(step)[key]
+                values[name] = round(max(lanes) + sum(pick(s)[key] for s in serial), 1)
+            return values
+
+        if not missing:
+            eta.update(status="schedule_heuristic", **schedule(lambda s: s["eta"]))
+        elif all(s["eta"]["p50_seconds"] is not None or s.get("eta_fallback") for s in steps):
+            # Strict plan ETA stays unknown; the proxy is reported beside it, not instead of it.
+            proxied = [s["name"] for s in steps if s["eta"]["p50_seconds"] is None]
+            eta_fallback = {"status": "provisional_fallback", "fallback": True, "basis": "schedule_heuristic",
+                            "scope": "mixed_exact_and_fallback_steps", "uncertainty": "cross_model_proxy",
+                            "fallback_steps": proxied, "steps_total": len(steps),
+                            "source_models": dict(collections.Counter(
+                                m for s in steps if s["name"] in proxied
+                                for m, n in s["eta_fallback"]["source_models"].items() for _ in range(n))),
+                            **schedule(lambda s: s["eta"] if s["eta"]["p50_seconds"] is not None
+                                       else s["eta_fallback"])}
     codex_predictions = []
     plan = quotas.get("codex", {}).get("plan_type")
     for step in steps:
         if step["backend"] == "codex":
-            tip = estimate_quota.forecast(samples, step["model"], step["effort"], plan, now)
+            tip = estimate_quota.forecast(samples, step["model"], step["effort"], plan, now,
+                                          predecessors=estimate_eta.predecessors("codex", step["model"]))
             step["quota_forecast"] = tip
             codex_predictions.append(tip)
     quota_forecast = estimate_quota.aggregate(codex_predictions) if codex_predictions else {"status": "unsupported"}
     result = {"schema": 3, "mode": args.mode, "generated_at": now, "eta": eta, "steps": steps, "quotas": quotas,
               "quota_forecast": quota_forecast, "deadline_epoch": args.deadline, "task_class": steps[0]["task_class"] if not args.plan else args.task_class,
               "decision": policy(quotas, args.deadline, eta, time.time(), quota_forecast)}
+    if eta_fallback:
+        result["eta_fallback"] = eta_fallback
     if attempt_id:
         result.update(attempt_id=attempt_id, claude_meter_tracked=tracked)
     if args.output:
@@ -353,6 +375,19 @@ def estimate(args):
         emit(result)
     else:
         render(result, markup=args.format == "html")
+
+
+def fallback_basis(fb):
+    """Short Ukrainian description of where a proxy ETA came from."""
+    models = ", ".join(f"{m} ×{n}" for m, n in fb.get("source_models", {}).items())
+    kind = {"version_family_predecessor": "попередня версія родини, той самий рівень міркування",
+            "backend_effort": "різні моделі, той самий рівень міркування",
+            "schedule_heuristic": "розклад кроків із проксі"}.get(fb.get("basis"), "проксі")
+    return f"{kind} · {models} · n={fb.get('n', fb.get('steps_total', '?'))}"
+
+
+def proxy_models(tip):
+    return ", ".join((tip.get("proxy") or {}).get("source_models", []))
 
 
 def render_codex_card(data, notices):
@@ -403,6 +438,12 @@ def render_codex_card(data, notices):
                         + (f" · +{len(missing)-5}" if len(missing) > 5 else ""))
     else:
         card.append("<b>час поки невідомий</b>")
+    fb = data.get("eta_fallback")
+    if fb and eta["p50_seconds"] is None:
+        label = "орієнтовний час плану (проксі)" if is_plan else "орієнтовний час (проксі)"
+        card.append(f"{label}: {number(duration(fb['p50_seconds']))} · верх "
+                    f"{number(duration(fb.get('p90_seconds', fb.get('upper_seconds')), upper=True))}")
+        card.append("ℹ " + esc(fallback_basis(fb)) + " · не історія самої моделі")
 
     tip = data.get("quota_forecast") or {}
     forecasts = tip.get("windows", {})
@@ -439,10 +480,18 @@ def render_codex_card(data, notices):
                     line += f" · залишок: {balance}"
                 if usable and reserve >= left:
                     line += " ⚠ може не вистачити"
+            elif "proxy_typical_pp" in f:
+                typical, reserve = f["proxy_typical_pp"], f["proxy_upper_pp"]
+                line = f"{window_label}: проксі {number(f'{typical:g}%')}"
+                if usable:
+                    line += f" ({left:g}% → {max(0, left-typical):.10g}%)"
+                line += f" · орієнтир верху {number(f'{reserve:g}%')}"
             else:
                 if backend == "codex":
                     line += " · прогноз н/д"
             card.append(line)
+        if backend == "codex" and tip.get("proxy"):
+            card.append("ℹ історичний проксі " + esc(proxy_models(tip)) + ", не гарантія; паралельні рани ділять одну квоту акаунта")
     card = ["<blockquote expandable>", *card, "</blockquote>"]
     if notices:
         action = data["decision"]["action"]
@@ -472,6 +521,11 @@ def render(data, markup=True):
         upper = eta.get("p90_seconds", eta.get("upper_seconds"))
         eta_basis = f"n={eta['n']}" if "n" in eta else "сума/розклад кроків"
         eta_lines.append(f"ETA {eta['p50_seconds']/60:.1f} хв · верх {upper/60:.1f} хв")
+    fb = data.get("eta_fallback")
+    if fb and eta["p50_seconds"] is None:
+        eta_lines.append(f"ETA (проксі) {fb['p50_seconds']/60:.1f} хв · верх "
+                         f"{fb.get('p90_seconds', fb.get('upper_seconds'))/60:.1f} хв · {fallback_basis(fb)}"
+                         " · не історія самої моделі")
     for backend, q in data["quotas"].items():
         windows = []
         for key in WINDOWS:
@@ -493,10 +547,16 @@ def render(data, markup=True):
                 typical = f"≈{window['typical_pp']:g}" if window["typical_pp"] >= 1 else "<1"
                 basis = {"model": "модель", "model_effort": "модель і рівень міркування", "sum_of_steps": "мін. на крок"}[window["basis"]]
                 parts.append(f"{key} {typical}, верх {window['planning_upper_pp']} в.п. ({basis}: n={window['n']})")
+            elif "proxy_typical_pp" in window:
+                parts.append(f"{key} проксі ≈{window['proxy_typical_pp']:g}, орієнтир верху "
+                             f"{window['proxy_upper_pp']} в.п. (n={window['n']})")
             elif "steps_covered" in window:
                 parts.append(f"{key} · є дані для {window['steps_covered']}/{tip['steps']} кроків")
             else:
                 parts.append(f"{key} · {window['n']}/{estimate_quota.MIN_SAMPLES} вимірів")
+        if tip.get("proxy"):
+            plain_note.append("Історичний проксі " + proxy_models(tip)
+                              + ", не гарантія; паралельні рани ділять одну квоту акаунта")
         if parts:
             forecast_title = "Квота Codex · сума кроків" if "steps" in tip else "Прогноз зміни квоти Codex"
             forecast_lines = parts

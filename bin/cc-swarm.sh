@@ -79,7 +79,7 @@ if [ -f "$WEEK_LOCK" ] && { [ -n "$SWARM_HAS_CLAUDE" ] ||
   exit 5
 fi
 
-notify(){ sh "$CC_NOTIFY" "$@" >/dev/null 2>&1 || true; }
+notify(){ CC_NOTIFY_RECEIPTS="$SWARM_DIR/telegram-receipts.jsonl" CC_NOTIFY_RECEIPT_RUN="$SWARM_ID" sh "$CC_NOTIFY" "$@" >/dev/null 2>&1 || true; }
 die(){ echo "cc-swarm: $*" >&2; notify "swarm $SWARM_ID: ВІДМОВА — $*"; exit 1; }
 
 # Агрегатний рядок swarm.runs (kind=swarm) — best-effort, суми токенів з лейнів,

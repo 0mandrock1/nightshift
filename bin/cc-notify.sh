@@ -73,8 +73,9 @@ else:
 esac
 
 # Rich preflight is opt-in via the renderer's expandable quote marker.
-if [ "$SILENT" = silent ] && [ -f "$BIN/cc-notify-rich.sh" ]; then
-  . "$BIN/cc-notify-rich.sh"
+[ -f "$BIN/cc-notify-rich.sh" ] && . "$BIN/cc-notify-rich.sh"
+KIND=notice; [ "$SILENT" = silent ] && KIND=preflight
+if [ "$SILENT" = silent ] && command -v cc_try_rich >/dev/null 2>&1; then
   if cc_try_rich "$MSG" "$BOT_TOKEN" "$OWNER_CHAT_ID" "$DN"; then exit 0; fi
 fi
 
@@ -102,6 +103,7 @@ echo "html: curl_rc=$CURL_RC http=$HTTP${ERR:+ api=$ERR}" >&2
 # Ретрай ПЛЕЙНТЕКСТОМ лише коли повідомлення реально не пройшло: curl не достукався
 # АБО код не 200 (напр. 400 через криві HTML-теги). rc=0 + 200 = доставлено, не дублюємо.
 if [ "$CURL_RC" -eq 0 ] && [ "$HTTP" = "200" ]; then
+  command -v cc_receipt >/dev/null 2>&1 && cc_receipt html "$BODY" "$KIND"
   exit 0
 fi
 
@@ -115,5 +117,8 @@ HTTP2=$(curl -sS --max-time 20 -o "$BODY" -w '%{http_code}' "$API" \
 CURL_RC2=$?
 ERR=""; [ "$HTTP2" = "200" ] || ERR=$(api_err)
 echo "plain: curl_rc=$CURL_RC2 http=$HTTP2${ERR:+ api=$ERR}" >&2
+if [ "$CURL_RC2" -eq 0 ] && [ "$HTTP2" = "200" ] && command -v cc_receipt >/dev/null 2>&1; then
+  cc_receipt plain "$BODY" "$KIND"
+fi
 
 exit 0

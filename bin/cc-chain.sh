@@ -143,7 +143,7 @@ NOTIFY_LOG=$CHAIN.notify-debug.log
 notify_send(){
   [ -f "$NOTIFY" ] || return 0
   _nk=$1; shift
-  _no=$(sh "$NOTIFY" "$@" 2>&1 >/dev/null); _nrc=$?
+  _no=$(CC_NOTIFY_RECEIPTS="$CHAIN.telegram-receipts.jsonl" CC_NOTIFY_RECEIPT_RUN="$(basename "$CHAIN" .log)" sh "$NOTIFY" "$@" 2>&1 >/dev/null); _nrc=$?
   { echo "--- $_nk $(date -u +%FT%TZ) ---"; [ -n "$_no" ] && printf '%s\n' "$_no"; echo "$_nk rc=$_nrc"; } >> "$NOTIFY_LOG" 2>/dev/null
   case "$_no" in
     *"http=200"*) : ;;

@@ -142,9 +142,9 @@ fi
 # Best-effort: нотифікація ніколи не валить ран і не чіпає код виходу.
 # notify — afterflight (ok/fail/session), зі звуком, однорядковий телеграф.
 # notify_silent — preflight (старт, <pre>-таблиця), без звуку.
-notify(){ [ -f "$NOTIFY" ] || return 0; { echo "--- notify $(date -u +%FT%TZ) ---"; sh "$NOTIFY" "$*${V3_FACT:+
+notify(){ [ -f "$NOTIFY" ] || return 0; { echo "--- notify $(date -u +%FT%TZ) ---"; CC_NOTIFY_RECEIPTS="$D/telegram-receipts.jsonl" CC_NOTIFY_RECEIPT_RUN="$ID" sh "$NOTIFY" "$*${V3_FACT:+
 <pre>$V3_FACT</pre>}"; echo "notify rc=$?"; } >>"$D/notify-debug.log" 2>&1 || true; }
-notify_silent(){ [ -f "$NOTIFY" ] || return 0; { echo "--- notify_silent $(date -u +%FT%TZ) ---"; sh "$NOTIFY" "$1" silent; echo "notify_silent rc=$?"; } >>"$D/notify-debug.log" 2>&1 || true; }
+notify_silent(){ [ -f "$NOTIFY" ] || return 0; { echo "--- notify_silent $(date -u +%FT%TZ) ---"; CC_NOTIFY_RECEIPTS="$D/telegram-receipts.jsonl" CC_NOTIFY_RECEIPT_RUN="$ID" sh "$NOTIFY" "$1" silent; echo "notify_silent rc=$?"; } >>"$D/notify-debug.log" 2>&1 || true; }
 # Екранування під HTML parse_mode Telegram (див. cc-notify.sh).
 esc(){ printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 # Причина провалу без RESULT: фонове очікування чи ні. Код виходу не міняє —

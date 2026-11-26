@@ -6,6 +6,14 @@ import math
 from estimate_quota import quantile
 
 
+# Explicit same-tier predecessors, nearest first. Never inferred from names.
+FAMILY_PREDECESSORS = {("codex", "gpt-6.2-sol"): ("gpt-6.1-sol",)}
+
+
+def predecessors(backend, model):
+    return FAMILY_PREDECESSORS.get((backend, model), ())
+
+
 def model_key(backend, model):
     if backend == "claude" and model.startswith("claude-"):
         tier = model.split("-")[1]
@@ -81,3 +89,54 @@ def measured_candidate(rows, backend, model, effort, cutoff, task_class, baselin
             "p90_seconds": round(max(upper, quantile(values, .9), typical), 1),
             "sources": {"wrapper_monotonic": len(values)},
             "observed_seconds": [round(min(values), 1), round(max(values), 1)]}
+
+
+def fallback(rows, backend, model, effort, cutoff, task_class=None, *,
+             recent=24, window=60*86400, min_family=5, min_backend=10):
+    """Provisional cold-start ETA for a model without enough exact history.
+
+    Order: explicit version-family predecessors at the same effort, then
+    backend + effort across models. Returns None when no cohort is defensible.
+    The result is a proxy and never replaces the strict exact-model forecast.
+    """
+    if backend != "codex" or not effort:
+        return None
+    usable = [
+        r for r in rows
+        if r.get("backend") == backend and r.get("outcome") == "ok" and r.get("effort") == effort
+        and type(r.get("seconds")) in (int, float) and 0 < r["seconds"] < math.inf
+        and r.get("finished_at") is not None
+        and cutoff - window <= max(r["finished_at"], r.get("recorded_at") or r["finished_at"]) < cutoff
+        and r.get("model") and r.get("model_source") != "resolved_only"
+        and r.get("source") != "mtime_proxy"
+    ]
+    usable.sort(key=lambda r: r["finished_at"], reverse=True)
+
+    def narrow(pool, scope):
+        if task_class:
+            same = [r for r in pool if r.get("task_class") == task_class]
+            if len(same) >= (min_family if scope.startswith("family") else min_backend):
+                return same, scope + "_task_class"
+        return pool, scope
+
+    pool = scope = basis = None
+    for older in predecessors(backend, model):
+        candidates = [r for r in usable if r["model"] == older]
+        if len(candidates) >= min_family:
+            (pool, scope), basis = narrow(candidates, "family_predecessor_effort"), "version_family_predecessor"
+            break
+    if pool is None:
+        candidates = [r for r in usable if r["model"] != model]
+        if len(candidates) >= min_backend:
+            (pool, scope), basis = narrow(candidates, "backend_effort"), "backend_effort"
+    if pool is None:
+        return None
+    sample = pool[:recent]
+    values = [r["seconds"] for r in sample]
+    return {"status": "provisional_fallback", "fallback": True, "basis": basis, "scope": scope,
+            "requested_model": model, "effort": effort, "n": len(sample),
+            "source_models": dict(collections.Counter(r["model"] for r in sample)),
+            "p50_seconds": round(quantile(values, .5), 1), "p90_seconds": round(quantile(values, .9), 1),
+            "observed_seconds": [round(min(values), 1), round(max(values), 1)],
+            "sources": dict(collections.Counter(r.get("source", "unknown") for r in sample)),
+            "uncertainty": "cross_model_proxy"}

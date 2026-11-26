@@ -1,4 +1,30 @@
 #!/bin/sh
+# Delivery receipt for one successful Telegram send, scoped to one run.
+#   cc_receipt <delivery: rich|html|plain> <response-body-file> <kind: preflight|notice>
+# Appends {message_id, delivery, kind, ts[, run]} to $CC_NOTIFY_RECEIPTS (a per-run file set by the
+# caller; unset = no receipt). Only the message_id is read from the response: no token, chat id or
+# text is stored. Best-effort: never changes the notifier's result.
+cc_receipt() {
+  [ -n "${CC_NOTIFY_RECEIPTS:-}" ] && [ -f "$2" ] || return 0
+  python3 -c '
+import json, os, sys, time
+try:
+    message_id = json.load(open(sys.argv[2]))["result"]["message_id"]
+    if type(message_id) is not int or message_id <= 0:
+        sys.exit(0)
+    record = {"schema": 1, "message_id": message_id, "delivery": sys.argv[1], "kind": sys.argv[3],
+              "ts": round(time.time(), 3)}
+    if os.environ.get("CC_NOTIFY_RECEIPT_RUN"):
+        record["run"] = os.environ["CC_NOTIFY_RECEIPT_RUN"]
+    fd = os.open(os.environ["CC_NOTIFY_RECEIPTS"], os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as out:
+        out.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+except (OSError, ValueError, KeyError, TypeError):
+    pass
+' "$1" "$2" "${3:-notice}" 2>/dev/null || true
+  return 0
+}
+
 # Shared opt-in Rich Messages transport for a preflight's expandable quote.
 # Return 0: delivered or delivery uncertain (do not duplicate);
 # return 1: not applicable or explicitly rejected (use ordinary Telegram HTML).
@@ -30,10 +56,13 @@ def quota_value(value):
 def format_card(text):
     result, rows, warnings = [], [], []
     in_quota = False
+    proxy = []
     def flush():
         if rows:
-            result.append(table(["ліміт", "прогноз", "максимум"], rows))
+            headers = ["ліміт", "проксі", "орієнтир верху"] if proxy else ["ліміт", "прогноз", "максимум"]
+            result.append(table(headers, rows))
             rows.clear()
+            proxy.clear()
         result.extend(paragraphs(w) for w in warnings)
         warnings.clear()
     for line in text.splitlines():
@@ -52,6 +81,12 @@ def format_card(text):
             typical, upper = value.split(" · максимум ", 1)
             result.append(table([label, "максимум"], ["<tr>" + cell(typical) + cell(upper) + "</tr>"]))
             continue
+        if line.startswith(("орієнтовний час (проксі):", "орієнтовний час плану (проксі):")) and " · верх " in line:
+            flush()
+            label, value = line.split(": ", 1)
+            typical, upper = value.split(" · верх ", 1)
+            result.append(table([label, "верх"], ["<tr>" + cell(typical) + cell(upper) + "</tr>"]))
+            continue
         if in_quota and line.startswith(("<b><i>5</i></b> год: ", "<b><i>7</i></b> днів: ")):
             label, value = line.split(": ", 1)
             if " · максимум " in value:
@@ -64,6 +99,11 @@ def format_card(text):
                     warnings.append(label + " · залишок: " + balance)
                 rows.append("<tr>" + cell(label, "left") + cell(quota_value(typical))
                             + cell(quota_value(upper)) + "</tr>")
+            elif " · орієнтир верху " in value:
+                typical, upper = value.split(" · орієнтир верху ", 1)
+                proxy.append(True)
+                rows.append("<tr>" + cell(label, "left") + cell(quota_value(typical.removeprefix("проксі ")))
+                            + cell(upper) + "</tr>")
             else:
                 rows.append("<tr>" + cell(label, "left") + cell(value, span=2) + "</tr>")
             continue
@@ -104,6 +144,7 @@ except (OSError, ValueError, AttributeError, TypeError):
     print("response_unverified")
 ' "$rich_body" 2>/dev/null)
     echo "rich: curl_rc=$rich_rc http=$rich_http $rich_meta" >&2
+    cc_receipt rich "$rich_body" preflight
     rm -f "$rich_body"
     return 0
   fi
