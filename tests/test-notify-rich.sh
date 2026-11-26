@@ -70,4 +70,46 @@ PY
   TEST_CASE=success sh "$BIN/$notifier" 'звичайне повідомлення' silent
   [ "$(cat "$TEST_CALLS")" = legacy ]
 done
+# Real preflight shape: native tables, equal columns, balance on a separate line,
+# sparse/stale forecasts, and a quota warning must all survive conversion.
+CARD='<blockquote expandable>
+<b>⏱ ран · прогноз часу</b>
+codex · gpt-6-luna · високий
+
+орієнтовний час: <b><i>7 хв</i></b> · максимум <b><i>24 хв</i></b>
+
+<b>🔋 ран · прогноз</b> лімітів
+<b><i>5</i></b> год: <b><i>1%</i></b> (65% → 64%) · максимум <b><i>4%</i></b> (65% → 61%)
+<b><i>7</i></b> днів: <b><i>0%</i></b> (72% → 72%) · максимум <b><i>2%</i></b> (72% → 70%)
+</blockquote>
+⚠ увага'
+TEST_CASE=success sh "$BIN/cc-notify.sh" "$CARD" silent
+python3 - "$TEST_PAYLOAD" <<'PYTEST'
+import json, sys
+h = json.load(open(sys.argv[1]))["html"]
+assert h.count("<table compact>") == 2
+assert h.count("<tr>") == 5
+assert h.count("<th align=") == 5
+for v in ("<b><i>7 хв</i></b>", "<b><i>24 хв</i></b>",
+          "<b><i>1%</i></b><br>(65% → 64%)", "<b><i>4%</i></b><br>(65% → 61%)",
+          "<b><i>0%</i></b><br>(72% → 72%)", "<b><i>2%</i></b><br>(72% → 70%)"):
+    assert v in h, v
+assert h.endswith("</details><p>⚠ увага</p>")
+PYTEST
+SPARSE='<blockquote expandable>
+<b>🔋 ран · прогноз</b> лімітів
+<b><i>5</i></b> год: <b><i>0.5%</i></b> (1% → 0.5%) · максимум <b><i>2%</i></b> (1% → 0%) ⚠ може не вистачити
+<b><i>7</i></b> днів: <b>неактуально</b> · прогноз н/д
+<b>◈ claude · вільний ліміт</b>
+<b><i>5</i></b> год: <b><i>80%</i></b>
+</blockquote>'
+TEST_CASE=success sh "$BIN/cc-notify.sh" "$SPARSE" silent
+python3 - "$TEST_PAYLOAD" <<'PYTEST'
+import json, sys
+h = json.load(open(sys.argv[1]))["html"]
+assert h.count("<table compact>") == 1
+assert "colspan=\"2\"><b>неактуально</b> · прогноз н/д" in h
+assert "</table><p>⚠ <b><i>5</i></b> год: може не вистачити</p>" in h
+assert "<p><b><i>5</i></b> год: <b><i>80%</i></b></p>" in h
+PYTEST
 echo 'OK: Rich details closed by default; warning outside; explicit rejection fallback; no duplicate after ambiguous delivery'

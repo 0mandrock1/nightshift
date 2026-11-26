@@ -16,8 +16,64 @@ prefix, body = source.split(opening, 1)
 body, suffix = body.split(closing, 1)
 def paragraphs(text):
     return "".join("<p>" + line + "</p>" for line in text.splitlines() if line.strip())
+def table(headers, rows):
+    head = "<tr>" + "".join("<th align=\"center\">" + h + "</th>" for h in headers) + "</tr>"
+    return "<table compact>" + head + "".join(rows) + "</table>"
+
+def cell(value, align="center", span=1):
+    return f"<td align=\"{align}\" valign=\"middle\" colspan=\"{span}\">{value}</td>"
+
+def quota_value(value):
+    # Keep the estimated spend bold/italic, but move its balance onto its own line.
+    return value.replace(" (", "<br>(", 1)
+
+def format_card(text):
+    result, rows, warnings = [], [], []
+    in_quota = False
+    def flush():
+        if rows:
+            result.append(table(["ліміт", "прогноз", "максимум"], rows))
+            rows.clear()
+        result.extend(paragraphs(w) for w in warnings)
+        warnings.clear()
+    for line in text.splitlines():
+        if not line.strip():
+            flush()
+            continue
+        if line.startswith("<b>🔋 "):
+            flush()
+            in_quota = True
+        elif line.startswith("<b>◈ "):
+            flush()
+            in_quota = False
+        if line.startswith(("орієнтовний час:", "орієнтовний час плану:")) and " · максимум " in line:
+            flush()
+            label, value = line.split(": ", 1)
+            typical, upper = value.split(" · максимум ", 1)
+            result.append(table([label, "максимум"], ["<tr>" + cell(typical) + cell(upper) + "</tr>"]))
+            continue
+        if in_quota and line.startswith(("<b><i>5</i></b> год: ", "<b><i>7</i></b> днів: ")):
+            label, value = line.split(": ", 1)
+            if " · максимум " in value:
+                typical, upper = value.split(" · максимум ", 1)
+                if " ⚠ " in upper:
+                    upper, warning = upper.split(" ⚠ ", 1)
+                    warnings.append("⚠ " + label + ": " + warning)
+                if " · залишок: " in upper:
+                    upper, balance = upper.split(" · залишок: ", 1)
+                    warnings.append(label + " · залишок: " + balance)
+                rows.append("<tr>" + cell(label, "left") + cell(quota_value(typical))
+                            + cell(quota_value(upper)) + "</tr>")
+            else:
+                rows.append("<tr>" + cell(label, "left") + cell(value, span=2) + "</tr>")
+            continue
+        flush()
+        result.append(paragraphs(line))
+    flush()
+    return "".join(result)
+
 html = (paragraphs(prefix) + "<details><summary>📊 прогноз часу та лімітів</summary>"
-        + paragraphs(body) + "</details>" + paragraphs(suffix))
+        + format_card(body) + "</details>" + paragraphs(suffix))
 print(json.dumps({"html": html, "skip_entity_detection": True}, ensure_ascii=False))
 ' 2>/dev/null) || return 1
   rich_body=$(mktemp 2>/dev/null) || return 1
@@ -36,6 +92,14 @@ try:
     blocks = result.get("rich_message", {}).get("blocks", [])
     types = [b.get("type", "?") for b in blocks]
     print("ok=%s blocks=%s" % (response.get("ok") is True, ",".join(types)))
+    for block in blocks:
+        if block.get("type") == "details":
+            nested = block.get("blocks", [])
+            tables = [b for b in nested if b.get("type") == "table"]
+            print("details_open=%s tables=%s rows=%s compact=%s" % (
+                bool(block.get("is_open")), len(tables),
+                ",".join(str(len(t.get("cells", []))) for t in tables),
+                all(t.get("is_compact") for t in tables)))
 except (OSError, ValueError, AttributeError, TypeError):
     print("response_unverified")
 ' "$rich_body" 2>/dev/null)
