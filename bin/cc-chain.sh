@@ -204,6 +204,13 @@ SYNCONLY
 # лише мітка в fail_reason/лог/нотифікацію, щоб статистика не плутала BG-WAIT
 # з провалом задачі.
 fail_reason(){
+  # Детермінована класифікація — cc-fail-class.sh (токени: TIMEOUT KILLED SESSION-LIMIT
+  # CC-OUTDATED SAFETY-FLAG OVERLOADED RATE-LIMIT AUTH API-ERROR BG-WAIT NO-OUTPUT NO-RESULT).
+  # $2 — код виходу claude. Нема скрипта чи порожній вивід — стара логіка нижче.
+  if [ -f "$BIN/cc-fail-class.sh" ]; then
+    _fc=$(sh "$BIN/cc-fail-class.sh" "$1" "${2:-}" 2>/dev/null)
+    [ -n "$_fc" ] && { echo "$_fc"; return; }
+  fi
   if tail -60 "$1/out.log" 2>/dev/null | grep -aqiE 'background|run_in_background|фонов|монітор|monitor|poller|чекаю'; then
     echo BG-WAIT
   else
@@ -410,7 +417,7 @@ $STEP_PREFLIGHT"
       if tail -40 "$d/out.log" | grep -aqE "RESULT:[[:space:]]*\**[[:space:]]*fail"; then
         RMSG="RESULT: fail"
       else
-        R=$(fail_reason "$d"); echo "$R" > "$d/fail_reason"
+        R=$(fail_reason "$d" "${CLAUDE_EXIT:-}"); echo "$R" > "$d/fail_reason"
         RMSG="RESULT відсутній, $R"
       fi
       log "$id: AMBIGUOUS — claude завершився чисто, $RMSG — ланцюг спинено для ручної перевірки, гілка лишена"
@@ -419,7 +426,7 @@ $STEP_PREFLIGHT"
       notify "⚠️ $TAG · ambiguous · <code>$id</code> · $PASSED ok до цього · exit 4 · $RMSG, перевір вручну · гілку лишено"; exit 4
     fi
     R=OK-FAIL
-    tail -40 "$d/out.log" | grep -aqE "RESULT:[[:space:]]*\**[[:space:]]*fail" || R=$(fail_reason "$d")
+    tail -40 "$d/out.log" | grep -aqE "RESULT:[[:space:]]*\**[[:space:]]*fail" || R=$(fail_reason "$d" "${CLAUDE_EXIT:-}")
     [ "$CLAUDE_EXIT" = 124 ] && R="$R+TIMEOUT"
     echo "$R" > "$d/fail_reason"
     log "$id: FAIL [$R] — ланцюг спинено, гілка лишена як є для розбору"

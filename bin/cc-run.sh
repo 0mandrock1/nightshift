@@ -151,6 +151,13 @@ esc(){ printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g
 # лише мітка в fail_reason/лог/нотифікацію, щоб статистика не плутала BG-WAIT
 # з провалом задачі.
 fail_reason(){
+  # Детермінована класифікація — cc-fail-class.sh (токени: TIMEOUT KILLED SESSION-LIMIT
+  # CC-OUTDATED SAFETY-FLAG OVERLOADED RATE-LIMIT AUTH API-ERROR BG-WAIT NO-OUTPUT NO-RESULT).
+  # $2 — код виходу claude. Нема скрипта чи порожній вивід — стара логіка нижче.
+  if [ -f "$BIN/cc-fail-class.sh" ]; then
+    _fc=$(sh "$BIN/cc-fail-class.sh" "$1" "${2:-}" 2>/dev/null)
+    [ -n "$_fc" ] && { echo "$_fc"; return; }
+  fi
   if tail -60 "$1/out.log" 2>/dev/null | grep -aqiE 'background|run_in_background|фонов|монітор|monitor|poller|чекаю'; then
     echo BG-WAIT
   else
@@ -397,12 +404,12 @@ fi
 # Нема рядка RESULT. claude завершився чисто (RC=0) — це формат-провал агента
 # (забув Report-блок), не провал задачі; не позначати як fail наосліп.
 if [ "$RC" = 0 ]; then
-  R=$(fail_reason "$D"); echo "$R" > "$D/fail_reason"
+  R=$(fail_reason "$D" "${RC:-}"); echo "$R" > "$D/fail_reason"
   finish_single ambiguous 4
   notify "⚠️ $TAG · ambiguous · <code>$ID</code> · exit 0, нема RESULT ($R) — перевір out.log вручну${NOTES:+ · $(esc "$NOTES")}"
   exit 4
 fi
-R=$(fail_reason "$D"); echo "$R" > "$D/fail_reason"
+R=$(fail_reason "$D" "${RC:-}"); echo "$R" > "$D/fail_reason"
 WHY="нема рядка RESULT у хвості логу, $R"
 [ "$RC" = 124 ] && WHY="$WHY, timeout ${RUN_TIMEOUT_S:-2700}s"
 finish_single fail 2
