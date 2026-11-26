@@ -33,7 +33,7 @@ print(os.environ.get("HTTP_CODE", "200"), end="")
                                 env=dict(env, HTTP_CODE=http),
                                 capture_output=True, text=True, check=True)
         calls = [json.loads(line) for line in capture.read_text().splitlines()]
-        assert len(calls) == (1 if http == "200" else 2), result.stderr
+        assert len(calls) == (2 if http == "400" else 1), result.stderr
         return [next(a[5:] for a in call if a.startswith("text=")) for call in calls]
 
     for status in ["❌", "⏱️", "☠️", "⚠️"]:
@@ -48,6 +48,7 @@ print(os.environ.get("HTTP_CODE", "200"), end="")
     assert send(long) == ["<pre>" + long + "</pre>"]
     oversized = "❌ " + "x" * 4100
     assert send(oversized) == [oversized]
+    assert len(send("❌ <code>run</code>", http="500")) == 1
     assert send("❌ <code>run</code>", http="400")[-1] == "❌ run"
 print("test-notify-copy: OK (4 failure statuses, unchanged statuses, silent, limits, fallback)")
 PY

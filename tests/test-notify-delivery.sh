@@ -9,6 +9,7 @@
 #       повідомлення "вбито", дочірній claude прибито.
 # Реальний Telegram не викликається: curl підмінено через PATH, токен фейковий.
 set -u
+export CC_NOTIFY_REFRESH=0
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=$(cd "$HERE/../bin" && pwd)
 TMP=$(mktemp -d)

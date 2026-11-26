@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
-python3 - <<'PY'
+PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
 import importlib.util, pathlib, tempfile, json, os
 from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('refresh','bin/cc-notify-refresh.py')

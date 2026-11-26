@@ -109,6 +109,9 @@ if [ "$CURL_RC" -eq 0 ] && [ "$HTTP" = "200" ]; then
 fi
 
 # Фолбек: той самий текст без розмітки.
+# A timeout/5xx may have delivered the message. Do not create a duplicate
+# with another send; only an explicit markup rejection justifies fallback.
+[ "$CURL_RC" -eq 0 ] && [ "$HTTP" = 400 ] || exit 0
 PLAIN=$(printf '%s' "$ORIGINAL_MSG" | sed -e 's/<[^>]*>//g')
 HTTP2=$(curl -sS --max-time 20 -o "$BODY" -w '%{http_code}' "$API" \
   --data-urlencode "chat_id=${OWNER_CHAT_ID}" \

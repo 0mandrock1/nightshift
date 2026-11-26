@@ -7,14 +7,14 @@ trap 'rm -rf "$TMP"' EXIT
 FAKE="$TMP/codex"
 cat > "$FAKE" <<'EOF_FAKE'
 #!/usr/bin/env python3
-import json,sys
+import json,sys,time
 for line in sys.stdin:
     try: obj=json.loads(line)
     except Exception: continue
     if obj.get("id")==1:
         print(json.dumps({"id":1,"result":{"userAgent":"stub"}}), flush=True)
     elif obj.get("id")==2:
-        print(json.dumps({"id":2,"result":{"ordinaryUsageAllowed":True,"rateLimits":{"limitId":"codex","primary":{"usedPercent":28,"windowDurationMins":300,"resetsAt":1},"secondary":{"usedPercent":25,"windowDurationMins":10080,"resetsAt":2},"planType":"plus"}}}), flush=True)
+        print(json.dumps({"id":2,"result":{"ordinaryUsageAllowed":True,"rateLimits":{"limitId":"codex","primary":{"usedPercent":28,"windowDurationMins":300,"resetsAt":int(time.time())+300},"secondary":{"usedPercent":25,"windowDurationMins":10080,"resetsAt":int(time.time())+604800},"planType":"plus"}}}), flush=True)
         break
 EOF_FAKE
 chmod +x "$FAKE"
@@ -23,8 +23,9 @@ T=$(CC_CODEX_USAGE_BIN="$FAKE" sh "$BIN/cc-codex-usage.sh" --tuple)
 J=$(CC_CODEX_USAGE_BIN="$FAKE" sh "$BIN/cc-codex-usage.sh" --json)
 echo "$J" | grep -q '"used5hPercent":28' || { echo "FAIL json: $J"; exit 1; }
 TASK="$TMP/task.md"; echo test > "$TASK"
+P=$(CC_PG_CREDS="$TMP/none" CC_CODEX_USAGE_BIN="$FAKE" sh "$BIN/cc-estimate.sh" --task "$TASK" --model gpt-6-sol --backend codex --json)
+printf '%s' "$P" | python3 -c 'import json,sys; q=json.load(sys.stdin)["quotas"]["codex"]; assert q["source"]=="codex-app-server" and q["fresh"]; assert q["windows"]["5h"]["used_percent"]==28 and q["windows"]["5h"]["usable"]; assert q["windows"]["7d"]["used_percent"]==25 and q["windows"]["7d"]["usable"]'
 H=$(CC_PG_CREDS="$TMP/none" CC_CODEX_USAGE_BIN="$FAKE" sh "$BIN/cc-estimate.sh" --task "$TASK" --model gpt-6-sol --backend codex --compact-html)
-echo "$H" | grep -q '28%' || { echo "FAIL estimator 5h: $H"; exit 1; }
-echo "$H" | grep -q '25%' || { echo "FAIL estimator 7d: $H"; exit 1; }
-echo "$H" | grep -q 'codex-app-server' || { echo "FAIL source: $H"; exit 1; }
-echo "OK: Codex usage 5h/7d comes from app-server and estimator labels source"
+echo "$H" | grep -q '72%' || { echo "FAIL remaining 5h: $H"; exit 1; }
+echo "$H" | grep -q '75%' || { echo "FAIL remaining 7d: $H"; exit 1; }
+echo "OK: Codex usage 5h/7d comes from app-server; renderer shows remaining quota"
