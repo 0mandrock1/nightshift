@@ -72,6 +72,12 @@ else:
     ;;
 esac
 
+# Rich preflight is opt-in via the renderer's expandable quote marker.
+if [ "$SILENT" = silent ] && [ -f "$BIN/cc-notify-rich.sh" ]; then
+  . "$BIN/cc-notify-rich.sh"
+  if cc_try_rich "$MSG" "$BOT_TOKEN" "$OWNER_CHAT_ID" "$DN"; then exit 0; fi
+fi
+
 API="https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
 # Тіло відповіді — лише для діагностики не-200 (поле description, токена в ньому
 # нема); рішення "доставлено" все одно приймається за curl_rc + http.

@@ -22,6 +22,10 @@ send(){
     -o /dev/null -w '%{http_code}' 2>/dev/null
 }
 if [ "${2:-}" = silent ]; then
+  if [ -f "$BIN/cc-notify-rich.sh" ]; then
+    . "$BIN/cc-notify-rich.sh"
+    if cc_try_rich "$MSG" "$T" "$C" true; then exit 0; fi
+  fi
   HTTP=$(send --data-urlencode 'parse_mode=HTML' --data-urlencode 'disable_notification=true')
   # Retry explicitly rejected markup as text. A transport failure may already have delivered it.
   if [ "$HTTP" = 400 ]; then

@@ -325,7 +325,9 @@ $STEP_PREFLIGHT"
     printf '%s\n' "$STEP_PREFLIGHT" > "$d/preflight.log"
     log "$id: $STEP_PREFLIGHT"
     stop_if_denied
-    notify_silent "<b>$TAG · крок</b> · <code>$id</code>
+    START_TAG=$TAG
+    [ "$TAG" != chain ] || START_TAG=ланцюг
+    notify_silent "<b>$(printf '%s' "$START_TAG" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g') · крок</b> · <code>$(printf '%s' "$id" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')</code>
 $STEP_PREFLIGHT"
   elif [ "$backend" = claude ]; then
     UTIL_BEFORE=$(cc_util_snapshot)
@@ -488,7 +490,10 @@ if { [ -n "$PLAN_HAS_CODEX" ] && cc_v3_enabled codex; } || cc_v3_enabled claude;
     PLAN_V3="$CHAIN.preflight-v3.json"
     PF_HTML=$(cc_v3_render "$PLAN_V3")
     log "$PF_HTML"
-    notify_silent "<b>$TAG · старт ланцюга</b>
+    START_TAG=$TAG
+    START_ACTION="старт ланцюга"
+    if [ "$TAG" = chain ]; then START_TAG=ланцюг; START_ACTION=старт; fi
+    notify_silent "<b>$(printf '%s' "$START_TAG" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g') · $START_ACTION</b>
 $PF_HTML"
   fi
 fi

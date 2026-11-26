@@ -271,7 +271,7 @@ if [ -n "$PLAN_V3" ]; then
   V3_SWARM_HTML=$(cc_v3_render "$PLAN_V3")
   log "$V3_SWARM_HTML"
   SWARM_LABEL=$(printf '%s' "$SWARM_ID" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
-  notify "<b>Рій · старт</b> · <code>$SWARM_LABEL</code> · $LANE_N лейнів
+  notify "<b>рій · старт</b> · <code>$SWARM_LABEL</code> · $LANE_N лейнів
 $V3_SWARM_HTML" silent
 elif [ -n "$PREFLIGHT_TG" ]; then
   notify "$PREFLIGHT_TG" silent

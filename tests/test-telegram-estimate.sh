@@ -22,19 +22,22 @@ cat > "$TMP/estimate.json" <<'JSON'
 }
 JSON
 python3 "$BIN/cc-estimate-v3.py" render "$TMP/estimate.json" > "$TMP/card"
-grep -Fx 'орієнтовний час: <b><i><u>1 хв</u></i></b> · максимум <b><i><u>3 хв</u></i></b>' "$TMP/card"
+grep -Fx 'орієнтовний час: <b><i>1 хв</i></b> · максимум <b><i>3 хв</i></b>' "$TMP/card"
 grep -Fx 'codex · demo&lt;&amp;' "$TMP/card"
 grep -Fx '<b>🔋 ран · прогноз</b> лімітів' "$TMP/card"
-grep -Fx '<b><i><u>5</u></i></b> год: <b><i><u>0.5%</u></i></b> (50% → 49.5%) · максимум <b><i><u>2%</u></i></b> (50% → 48%)' "$TMP/card"
-grep -Fx '<b><i><u>7</u></i></b> днів: <b>немає даних</b> · прогноз н/д' "$TMP/card"
+grep -Fx '<b><i>5</i></b> год: <b><i>0.5%</i></b> (50% → 49.5%) · максимум <b><i>2%</i></b> (50% → 48%)' "$TMP/card"
+grep -Fx '<b><i>7</i></b> днів: <b>немає даних</b> · прогноз н/д' "$TMP/card"
+grep -Fx '<blockquote expandable>' "$TMP/card"
+grep -Fx '</blockquote>' "$TMP/card"
 grep -Fx '• ризик вийти за дедлайн' "$TMP/card"
+! grep -q '<u>' "$TMP/card"
 jq '.eta={n:2,p50_seconds:null,p90_seconds:null} |
     .quotas.codex.windows["5h"]={used_percent:94,usable:false} |
     .quota_forecast.windows={"5h":{n:1,basis:"model"},"7d":{n:0,basis:"model"}} |
     .decision={action:"defer",reason:"codex_provider_denied",retry_at:1795725728}'     "$TMP/estimate.json" > "$TMP/sparse.json"
 python3 "$BIN/cc-estimate-v3.py" render "$TMP/sparse.json" > "$TMP/sparse"
 grep -Fx '<b>час поки невідомий</b>' "$TMP/sparse"
-grep -Fx '<b><i><u>5</u></i></b> год: <b>неактуально</b> · прогноз н/д' "$TMP/sparse"
+grep -Fx '<b><i>5</i></b> год: <b>неактуально</b> · прогноз н/д' "$TMP/sparse"
 ! grep -q '→' "$TMP/sparse"
 grep -Fx '<b>⚠ запуск відкладено</b>' "$TMP/sparse"
 grep -Fx '• повтор після 26.11 22:42 за Києвом' "$TMP/sparse"
@@ -45,8 +48,8 @@ jq '.quota_forecast.windows["7d"]={typical_pp:0,planning_upper_pp:2,n:9,basis:"m
     .quotas.codex.windows["7d"]={used_percent:28,usable:true} |
     .quotas.codex.windows["5h"]={used_percent:99,usable:true}' "$TMP/estimate.json" > "$TMP/zero.json"
 python3 "$BIN/cc-estimate-v3.py" render "$TMP/zero.json" > "$TMP/zero"
-grep -Fx '<b><i><u>7</u></i></b> днів: <b><i><u>0%</u></i></b> (72% → 72%) · максимум <b><i><u>2%</u></i></b> (72% → 70%)' "$TMP/zero"
-grep -Fx '<b><i><u>5</u></i></b> год: <b><i><u>0.5%</u></i></b> (1% → 0.5%) · максимум <b><i><u>2%</u></i></b> (1% → 0%) ⚠ може не вистачити' "$TMP/zero"
+grep -Fx '<b><i>7</i></b> днів: <b><i>0%</i></b> (72% → 72%) · максимум <b><i>2%</i></b> (72% → 70%)' "$TMP/zero"
+grep -Fx '<b><i>5</i></b> год: <b><i>0.5%</i></b> (1% → 0.5%) · максимум <b><i>2%</i></b> (1% → 0%) ⚠ може не вистачити' "$TMP/zero"
 ! grep -q 'Максимум — прогноз' "$TMP/zero"
 ! grep -q '≈' "$TMP/zero"
 ! grep -q 'в.п.' "$TMP/zero"
@@ -64,6 +67,9 @@ printf 'SWARM_BOT_TOKEN=test\nSWARM_CHAT_ID=42\n' > "$TMP/environment"
 cat > "$TMP/bin/curl" <<'CURL'
 #!/bin/sh
 html=0
+for arg do
+  case "$arg" in */sendRichMessage) printf 404; exit 0 ;; esac
+done
 for arg do
   case "$arg" in
     parse_mode=HTML) html=1; printf '%s\n' "$arg" >> "$TEST_REQUESTS" ;;

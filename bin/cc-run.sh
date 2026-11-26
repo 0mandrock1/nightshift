@@ -186,8 +186,10 @@ if cc_v3_begin "$D" "$BACKEND" "$MODEL" "$ID"; then
   PF_HTML=$(cc_v3_render "$V3_PATH")
   printf '%s\n' "$PF_HTML" > "$D/preflight.log"
   stop_if_denied
-  notify_silent "<b>$TAG · старт</b>
-<code>$ID</code>
+  START_TAG=$TAG
+  case "$BACKEND:$TAG" in codex:run) START_TAG=ран ;; codex:swarm) START_TAG=рій ;; esac
+  notify_silent "<b>$(esc "$START_TAG") · старт</b>
+<code>$(esc "$ID")</code>
 $PF_HTML"
 else
   UTIL_BEFORE=$(backend_util_snapshot)

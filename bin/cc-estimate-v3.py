@@ -361,7 +361,7 @@ def render_codex_card(data, notices):
         return html.escape(str(value), quote=False)
 
     def number(value):
-        return f"<b><i><u>{value}</u></i></b>"
+        return f"<b><i>{value}</i></b>"
 
     def duration(seconds, upper=False):
         if seconds < 60:
@@ -378,7 +378,10 @@ def render_codex_card(data, notices):
     for (backend, model, effort), count in list(groups.items())[:4]:
         name = f"{backend} · {str(model)[:80]}"
         if effort:
-            name += f" · {str(effort)[:32]}"
+            effort_label = {"none": "без міркування", "minimal": "мінімальний",
+                            "low": "низький", "medium": "середній", "high": "високий",
+                            "xhigh": "дуже високий", "max": "максимальний"}.get(effort, effort)
+            name += f" · {str(effort_label)[:32]}"
         card.append(esc(name) + (f" ×{number(count)}" if count > 1 else ""))
     if len(groups) > 4:
         card.append(f"… ще {number(len(groups) - 4)} конфіг.")
@@ -393,10 +396,10 @@ def render_codex_card(data, notices):
             line += f" · максимум {number(duration(upper, upper=True))}"
         card.append(line)
     elif "steps_covered" in eta:
-        card.append(f"<b>eta плану н/д · є історія для {number(eta['steps_covered'])}/{number(eta['steps_total'])} кроків</b>")
+        card.append(f"<b>час плану н/д · є історія для {number(eta['steps_covered'])}/{number(eta['steps_total'])} кроків</b>")
         missing = eta.get("missing_steps", [])
         if missing:
-            card.append("без eta · " + esc(", ".join(str(x)[:60] for x in missing[:5]))
+            card.append("без прогнозу часу · " + esc(", ".join(str(x)[:60] for x in missing[:5]))
                         + (f" · +{len(missing)-5}" if len(missing) > 5 else ""))
     else:
         card.append("<b>час поки невідомий</b>")
@@ -440,6 +443,7 @@ def render_codex_card(data, notices):
                 if backend == "codex":
                     line += " · прогноз н/д"
             card.append(line)
+    card = ["<blockquote expandable>", *card, "</blockquote>"]
     if notices:
         action = data["decision"]["action"]
         heading = "запуск відкладено" if action == "defer" else "запуск заблоковано" if action == "block" else "увага"
