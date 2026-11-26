@@ -41,6 +41,37 @@ OWNER_CHAT_ID=$(grep -E '^OWNER_CHAT_ID=' "$ENV_FILE" 2>/dev/null | head -1 | cu
 [ -n "${BOT_TOKEN:-}" ] || { echo "cc-notify: нема BOT_TOKEN" >&2; exit 0; }
 [ -n "${OWNER_CHAT_ID:-}" ] || { echo "cc-notify: нема OWNER_CHAT_ID" >&2; exit 0; }
 
+# Failed afterflight: readable notification + a single copyable plain-text block.
+# Match the status prefix used by run/chain/seq, not words in agent NOTES.
+# Risky-start warnings and quota deferrals are intentionally not failures.
+ORIGINAL_MSG=$MSG
+case "$MSG" in
+  '❌ '*|'⏱️ '*|'☠️ '*|'⚠️ '*)
+    if [ "$SILENT" != silent ]; then
+      # Telegram limits the rendered text, not the escaped HTML source.
+      # If duplication would exceed the limit, prefer the full copy block.
+      # Keep the original notification if even the copy block is too large.
+      if COPY_MSG=$(printf '%s' "$MSG" | python3 -c '
+import html, re, sys
+source = sys.stdin.read()
+plain = html.unescape(re.sub(r"<[^>]*>", "", source))
+block = "<pre>" + html.escape(plain, quote=False) + "</pre>"
+units = len(plain.encode("utf-16-le")) // 2
+if 2 * units + 2 <= 4096:
+    print(source + "\n\n" + block)
+elif units <= 4096:
+    print(block)
+else:
+    print(source)
+' 2>/dev/null); then
+        MSG=$COPY_MSG
+      else
+        echo "cc-notify: copy block formatting failed; sending original" >&2
+      fi
+    fi
+    ;;
+esac
+
 API="https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
 # Тіло відповіді — лише для діагностики не-200 (поле description, токена в ньому
 # нема); рішення "доставлено" все одно приймається за curl_rc + http.
@@ -69,7 +100,7 @@ if [ "$CURL_RC" -eq 0 ] && [ "$HTTP" = "200" ]; then
 fi
 
 # Фолбек: той самий текст без розмітки.
-PLAIN=$(printf '%s' "$MSG" | sed -e 's/<[^>]*>//g')
+PLAIN=$(printf '%s' "$ORIGINAL_MSG" | sed -e 's/<[^>]*>//g')
 HTTP2=$(curl -sS --max-time 20 -o "$BODY" -w '%{http_code}' "$API" \
   --data-urlencode "chat_id=${OWNER_CHAT_ID}" \
   --data-urlencode "disable_web_page_preview=true" \
