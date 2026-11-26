@@ -1,5 +1,5 @@
 #!/bin/sh
-set -u
+set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=$(cd "$HERE/../bin" && pwd)
 TMP=$(mktemp -d)
@@ -23,9 +23,9 @@ T=$(CC_CODEX_USAGE_BIN="$FAKE" sh "$BIN/cc-codex-usage.sh" --tuple)
 J=$(CC_CODEX_USAGE_BIN="$FAKE" sh "$BIN/cc-codex-usage.sh" --json)
 echo "$J" | grep -q '"used5hPercent":28' || { echo "FAIL json: $J"; exit 1; }
 TASK="$TMP/task.md"; echo test > "$TASK"
-P=$(CC_PG_CREDS="$TMP/none" CC_CODEX_USAGE_BIN="$FAKE" sh "$BIN/cc-estimate.sh" --task "$TASK" --model gpt-6-sol --backend codex --json)
+P=$(CC_ESTIMATE_STATE="$TMP/empty-history" CC_PG_CREDS="$TMP/none" CC_CODEX_USAGE_BIN="$FAKE" sh "$BIN/cc-estimate.sh" --task "$TASK" --model gpt-6-sol --backend codex --json)
 printf '%s' "$P" | python3 -c 'import json,sys; q=json.load(sys.stdin)["quotas"]["codex"]; assert q["source"]=="codex-app-server" and q["fresh"]; assert q["windows"]["5h"]["used_percent"]==28 and q["windows"]["5h"]["usable"]; assert q["windows"]["7d"]["used_percent"]==25 and q["windows"]["7d"]["usable"]'
-H=$(CC_PG_CREDS="$TMP/none" CC_CODEX_USAGE_BIN="$FAKE" sh "$BIN/cc-estimate.sh" --task "$TASK" --model gpt-6-sol --backend codex --compact-html)
+H=$(CC_ESTIMATE_STATE="$TMP/empty-history" CC_PG_CREDS="$TMP/none" CC_CODEX_USAGE_BIN="$FAKE" sh "$BIN/cc-estimate.sh" --task "$TASK" --model gpt-6-sol --backend codex --compact-html)
 echo "$H" | grep -q '72%' || { echo "FAIL remaining 5h: $H"; exit 1; }
 echo "$H" | grep -q '75%' || { echo "FAIL remaining 7d: $H"; exit 1; }
 echo "OK: Codex usage 5h/7d comes from app-server; renderer shows remaining quota"
