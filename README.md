@@ -194,6 +194,22 @@ Plan file, one line per step: `slug|style|/abs/path/task.md|model|backend`.
 sh bin/cc-swarm.sh <repo> <swarm-plan> <swarm-id>
 ```
 
+**Queue one prepared run behind a successful prerequisite:**
+
+```sh
+setsid sh bin/cc-enqueue.sh <run-dir> <prerequisite-run-dir> [timeout-s] [style] [model] [backend]
+```
+
+The run directory and `task.md` must already exist; admission never creates a
+phantom run. The worker serializes admission with `queue.lock`, waits for the
+prerequisite's `exit_code` and final `RESULT: ok`, then invokes the same
+`cc-run.sh` contract once. A failed prerequisite becomes `BLOCKED`; timeout
+becomes `TIMEOUT`; an early worker failure becomes `FAILED`. Atomic
+`queue.meta`, `queue.pid`, `queue.status`, and `queue.log` record queue time,
+worker PID/start ticks/argv, and actual runner start time. `queue.meta` is the
+primary consumer contract; legacy `queue.pid` + `queue.status` workers remain
+readable when their exact argv identifies `<run-dir>/queue.sh <run-dir>`.
+
 Plan file, one line per lane: `lane-slug|task.md|verify-cmd|model|style|backend`.
 `verify-cmd` is mandatory — it runs inside the lane's worktree after the run
 and its exit code (0 = ok) is what the swarm actually trusts, not the
