@@ -360,6 +360,9 @@ def render_codex_card(data, notices):
     def esc(value):
         return html.escape(str(value), quote=False)
 
+    def number(value):
+        return f"<b><i><u>{value}</u></i></b>"
+
     def duration(seconds, upper=False):
         if seconds < 60:
             return f"{max(1, math.ceil(seconds) if upper else round(seconds))} с"
@@ -369,34 +372,34 @@ def render_codex_card(data, notices):
 
     eta, steps = data["eta"], data["steps"]
     is_plan = data.get("mode") in ("chain", "swarm") or len(steps) > 1
-    title = {"chain": "Ланцюг", "swarm": "Рій"}.get(data.get("mode"), "Ран")
+    title = {"chain": "ланцюг", "swarm": "рій"}.get(data.get("mode"), "ран")
     card = [f"<b>⏱ {title} · прогноз часу</b>"]
     groups = collections.Counter((s["backend"], s["model"], s.get("effort")) for s in steps)
     for (backend, model, effort), count in list(groups.items())[:4]:
-        name = f"{backend.capitalize()} · {str(model)[:80]}"
+        name = f"{backend} · {str(model)[:80]}"
         if effort:
             name += f" · {str(effort)[:32]}"
-        card.append(esc(name) + (f" ×{count}" if count > 1 else ""))
+        card.append(esc(name) + (f" ×{number(count)}" if count > 1 else ""))
     if len(groups) > 4:
-        card.append(f"… ще {len(groups) - 4} конфіг.")
+        card.append(f"… ще {number(len(groups) - 4)} конфіг.")
     if is_plan:
-        card.append(f"Кроків: {len(steps)}")
+        card.append(f"кроків: {number(len(steps))}")
     card.append("")
     if eta["p50_seconds"] is not None:
         upper = eta.get("p90_seconds", eta.get("upper_seconds"))
-        label = "Час плану" if is_plan else "Час"
-        line = f"{label}: <b>{duration(eta['p50_seconds'])}</b>"
+        label = "орієнтовний час плану" if is_plan else "орієнтовний час"
+        line = f"{label}: {number(duration(eta['p50_seconds']))}"
         if upper is not None:
-            line += f" · максимум {duration(upper, upper=True)}"
+            line += f" · максимум {number(duration(upper, upper=True))}"
         card.append(line)
     elif "steps_covered" in eta:
-        card.append(f"<b>ETA плану н/д · є історія для {eta['steps_covered']}/{eta['steps_total']} кроків</b>")
+        card.append(f"<b>eta плану н/д · є історія для {number(eta['steps_covered'])}/{number(eta['steps_total'])} кроків</b>")
         missing = eta.get("missing_steps", [])
         if missing:
-            card.append("Без ETA · " + esc(", ".join(str(x)[:60] for x in missing[:5]))
+            card.append("без eta · " + esc(", ".join(str(x)[:60] for x in missing[:5]))
                         + (f" · +{len(missing)-5}" if len(missing) > 5 else ""))
     else:
-        card.append("<b>Час поки невідомий</b>")
+        card.append("<b>час поки невідомий</b>")
 
     tip = data.get("quota_forecast") or {}
     forecasts = tip.get("windows", {})
@@ -408,10 +411,10 @@ def render_codex_card(data, notices):
     for backend in backends:
         quota = quotas.get(backend, {})
         if backend == "codex":
-            suffix = " Codex" if len(backends) > 1 else ""
+            suffix = " codex" if len(backends) > 1 else ""
             card.extend(["", f"<b>🔋 {title} · прогноз</b> лімітів{suffix}"])
         else:
-            card.extend(["", f"<b>◈ {esc(backend.capitalize())} · вільний ліміт</b>"])
+            card.extend(["", f"<b>◈ {esc(backend)} · вільний ліміт</b>"])
         for key in WINDOWS:
             w = quota.get("windows", {}).get(key, {})
             p = w.get("used_percent")
@@ -419,13 +422,14 @@ def render_codex_card(data, notices):
             usable = w.get("usable") and p is not None
             left = max(0, 100-p) if usable else None
             balance = f"{left:g}%" if usable else "неактуально" if p is not None else "немає даних"
-            line = f"{names[key]}: <b>{balance}"
+            window_label = number(names[key].split(" ", 1)[0]) + " " + names[key].split(" ", 1)[1]
+            line = f"{window_label}: " + (number(balance) if usable else f"<b>{balance}</b>")
             if "typical_pp" in f:
                 typical, reserve = f["typical_pp"], f["planning_upper_pp"]
-                line = f"{names[key]}: <b>{typical:g}%</b>"
+                line = f"{window_label}: {number(f'{typical:g}%')}"
                 if usable:
                     line += f" ({left:g}% → {max(0, left-typical):.10g}%)"
-                line += f" · максимум <b>{reserve:g}%</b>"
+                line += f" · максимум {number(f'{reserve:g}%')}"
                 if usable:
                     line += f" ({left:g}% → {max(0, left-reserve):.10g}%)"
                 else:
@@ -433,14 +437,13 @@ def render_codex_card(data, notices):
                 if usable and reserve >= left:
                     line += " ⚠ може не вистачити"
             else:
-                line += "</b>"
                 if backend == "codex":
                     line += " · прогноз н/д"
             card.append(line)
     if notices:
         action = data["decision"]["action"]
-        heading = "Запуск відкладено" if action == "defer" else "Запуск заблоковано" if action == "block" else "Увага"
-        card.extend(["", f"<b>⚠ {heading}</b>", *("• " + esc(n) for n in notices)])
+        heading = "запуск відкладено" if action == "defer" else "запуск заблоковано" if action == "block" else "увага"
+        card.extend(["", f"<b>⚠ {heading}</b>", *("• " + esc(n[:1].lower() + n[1:]) for n in notices)])
     print("\n".join(card))
 
 
