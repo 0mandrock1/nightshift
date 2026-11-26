@@ -565,7 +565,7 @@ def render(data, markup=True):
     elif any(step["backend"] == "claude" for step in data["steps"]):
         plain_note.append("Для Claude показано поточну квоту")
     if data["decision"]["action"] != "allow":
-        descriptions = {"quota_unavailable": "поточна квота недоступна", "codex_provider_denied": "Codex призупинив звичайні запуски",
+        descriptions = {"quota_unavailable": "квота на старті не підтверджена", "codex_provider_denied": "Codex призупинив звичайні запуски",
                         "current_quota_high": "залишок квоти малий", "deadline_at_risk": "ризик вийти за дедлайн",
                         "deadline_elapsed": "вказаний дедлайн минув",
                         "forecast_quota_at_risk": "за верхньою оцінкою можливе вичерпання квоти"}

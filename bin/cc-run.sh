@@ -188,7 +188,7 @@ if cc_v3_begin "$D" "$BACKEND" "$MODEL" "$ID"; then
   stop_if_denied
   START_TAG=$TAG
   case "$BACKEND:$TAG" in codex:run) START_TAG=ран ;; codex:swarm) START_TAG=рій ;; esac
-  notify_silent "<b>$(esc "$START_TAG") · старт</b>
+  CC_NOTIFY_PREFLIGHT_JSON="$V3_PATH" notify_silent "<b>$(esc "$START_TAG") · старт</b>
 <code>$(esc "$ID")</code>
 $PF_HTML"
 else

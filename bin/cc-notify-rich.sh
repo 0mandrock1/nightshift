@@ -25,6 +25,13 @@ except (OSError, ValueError, KeyError, TypeError):
   return 0
 }
 
+# Schedule only for an explicit v3 preflight and the exact successful response.
+# Content arrives via stdin; credentials stay in the existing private env file.
+cc_refresh_receipt() {
+  [ "${CC_NOTIFY_REFRESH:-1}" != 0 ] && [ -f "${CC_NOTIFY_PREFLIGHT_JSON:-}" ] || return 0
+  printf '%s' "$3" | python3 "$BIN/cc-notify-refresh.py" schedule "$CC_NOTIFY_PREFLIGHT_JSON" "$2" "$1" "$ENV_FILE" "${CC_NOTIFY_VARIANT:-run}" || true
+}
+
 # Shared opt-in Rich Messages transport for a preflight's expandable quote.
 # Return 0: delivered or delivery uncertain (do not duplicate);
 # return 1: not applicable or explicitly rejected (use ordinary Telegram HTML).
@@ -145,6 +152,7 @@ except (OSError, ValueError, AttributeError, TypeError):
 ' "$rich_body" 2>/dev/null)
     echo "rich: curl_rc=$rich_rc http=$rich_http $rich_meta" >&2
     cc_receipt rich "$rich_body" preflight
+    cc_refresh_receipt rich "$rich_body" "$rich_payload"
     rm -f "$rich_body"
     return 0
   fi

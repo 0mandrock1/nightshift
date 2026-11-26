@@ -104,6 +104,7 @@ echo "html: curl_rc=$CURL_RC http=$HTTP${ERR:+ api=$ERR}" >&2
 # АБО код не 200 (напр. 400 через криві HTML-теги). rc=0 + 200 = доставлено, не дублюємо.
 if [ "$CURL_RC" -eq 0 ] && [ "$HTTP" = "200" ]; then
   command -v cc_receipt >/dev/null 2>&1 && cc_receipt html "$BODY" "$KIND"
+  [ "$KIND" != preflight ] || cc_refresh_receipt html "$BODY" "$MSG"
   exit 0
 fi
 
@@ -119,6 +120,7 @@ ERR=""; [ "$HTTP2" = "200" ] || ERR=$(api_err)
 echo "plain: curl_rc=$CURL_RC2 http=$HTTP2${ERR:+ api=$ERR}" >&2
 if [ "$CURL_RC2" -eq 0 ] && [ "$HTTP2" = "200" ] && command -v cc_receipt >/dev/null 2>&1; then
   cc_receipt plain "$BODY" "$KIND"
+  [ "$KIND" != preflight ] || cc_refresh_receipt plain "$BODY" "$PLAIN"
 fi
 
 exit 0

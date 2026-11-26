@@ -17,6 +17,7 @@ T=$(grep -E '^SWARM_BOT_TOKEN=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-
 C=$(grep -E '^SWARM_CHAT_ID=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
 [ -n "${T:-}" ] && [ -n "${C:-}" ] || exit 0
 [ -f "$BIN/cc-notify-rich.sh" ] && . "$BIN/cc-notify-rich.sh"
+CC_NOTIFY_VARIANT=swarm
 BODY=$(mktemp 2>/dev/null) || BODY=/dev/null
 trap '[ "$BODY" = /dev/null ] || rm -f "$BODY"' EXIT
 send(){
@@ -31,11 +32,13 @@ if [ "${2:-}" = silent ]; then
   fi
   HTTP=$(send --data-urlencode 'parse_mode=HTML' --data-urlencode 'disable_notification=true')
   receipt "$HTTP" html preflight
+  [ "$HTTP" != 200 ] || cc_refresh_receipt html "$BODY" "$MSG"
   # Retry explicitly rejected markup as text. A transport failure may already have delivered it.
   if [ "$HTTP" = 400 ]; then
     MSG=$(printf '%s' "$MSG" | sed -e 's/<[^>]*>//g' -e 's/\&lt;/</g' -e 's/\&gt;/>/g' -e 's/\&amp;/\&/g')
     HTTP=$(send --data-urlencode 'disable_notification=true')
     receipt "$HTTP" plain preflight
+    [ "$HTTP" != 200 ] || cc_refresh_receipt plain "$BODY" "$MSG"
   fi
 else
   HTTP=$(send)
