@@ -355,6 +355,117 @@ def estimate(args):
         render(result, markup=args.format == "html")
 
 
+def render_codex_card(data, notices):
+    """Telegram view only; the JSON contract and admission policy stay unchanged."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    def esc(value):
+        return html.escape(str(value), quote=False)
+
+    def duration(seconds, upper=False):
+        if seconds < 60:
+            return f"{max(1, math.ceil(seconds) if upper else round(seconds))} с"
+        minutes = math.ceil(seconds / 60) if upper else math.floor(seconds / 60 + .5)
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours} год {minutes:02d} хв" if hours else f"{minutes} хв"
+
+    eta, steps = data["eta"], data["steps"]
+    is_plan = data.get("mode") in ("chain", "swarm") or len(steps) > 1
+    title = {"chain": "Ланцюг", "swarm": "Рій"}.get(data.get("mode"), "Ран")
+    card = [f"<b>⏱ {title} · прогноз часу</b>"]
+    groups = collections.Counter((s["backend"], s["model"], s.get("effort")) for s in steps)
+    for (backend, model, effort), count in list(groups.items())[:4]:
+        name = f"{backend.capitalize()} · {str(model)[:80]}"
+        if effort:
+            name += f" · {str(effort)[:32]}"
+        card.append(esc(name) + (f" ×{count}" if count > 1 else ""))
+    if len(groups) > 4:
+        card.append(f"… ще {len(groups) - 4} конфіг.")
+    if is_plan:
+        card.append(f"Кроків: {len(steps)}")
+    card.append("")
+    if eta["p50_seconds"] is not None:
+        upper = eta.get("p90_seconds", eta.get("upper_seconds"))
+        card.append(f"Типово: <b>≈ {duration(eta['p50_seconds'])}</b>")
+        if upper is not None:
+            card.append(f"Із запасом: <b>≈ {duration(upper, upper=True)}</b>")
+        if "n" in eta:
+            note = f"Історія: {eta['n']} ранів · попередньо"
+            if steps[0].get("effort") and "effort" not in eta.get("scope", ""):
+                note += " · різні рівні міркування"
+            if eta.get("sources", {}).get("mtime_proxy", 0)*2 > eta["n"]:
+                note += " · переважно непрямі заміри"
+        else:
+            note = "сума/розклад кроків · не гарантія"
+        card.append(f"<i>{esc(note)}</i>")
+    elif "steps_covered" in eta:
+        card.append(f"<b>ETA плану н/д · є історія для {eta['steps_covered']}/{eta['steps_total']} кроків</b>")
+        missing = eta.get("missing_steps", [])
+        if missing:
+            card.append("Без ETA · " + esc(", ".join(str(x)[:60] for x in missing[:5]))
+                        + (f" · +{len(missing)-5}" if len(missing) > 5 else ""))
+    else:
+        card.append("<b>Час поки невідомий</b>")
+        card.append(f"Історія: {eta.get('n', 0)} ранів · потрібно щонайменше 5")
+    if not is_plan:
+        step = steps[0]
+        measured = step.get("eta_shadow") or {}
+        if measured.get("observed_seconds"):
+            low, high = measured["observed_seconds"]
+            card.append(f"<i>Заміри: {low:.0f}–{high:.0f} с · {measured['n']} ранів</i>")
+
+    tip = data.get("quota_forecast") or {}
+    forecasts = tip.get("windows", {})
+    names = {"5h": "5 год", "7d": "7 днів"}
+    for backend, quota in data.get("quotas", {}).items():
+        card.extend(["", f"<b>◈ Ліміти {esc(backend.capitalize())} на старті</b>"])
+        for key in WINDOWS:
+            w = quota.get("windows", {}).get(key, {})
+            p = w.get("used_percent")
+            prefix = names[key]
+            if p is None:
+                card.append(f"{prefix}: немає даних")
+                continue
+            if not w.get("usable"):
+                card.append(f"{prefix}: {p:g}% використано · неактуально")
+                continue
+            left = max(0, 100 - p)
+            cells = min(10, max(0, math.floor(left / 10 + .5)))
+            bar = "▰" * cells + "▱" * (10 - cells)
+            card.append(f"{prefix}: {bar} <b>{left:g}% вільно</b>" +
+                        (f" ({p:g}% використано)" if p > 100 else ""))
+            if w.get("reset_at"):
+                reset = datetime.fromtimestamp(w["reset_at"], ZoneInfo("Europe/Kyiv"))
+                card.append(f"<i>↻ {reset:%d.%m %H:%M} · Київ</i>")
+
+    if tip.get("backend") == "codex":
+        card.extend(["", "<b>◈ Прогноз зміни лічильника Codex</b>"])
+        if not forecasts:
+            card.append("Немає прогнозу: тариф не підтверджено")
+        for key in WINDOWS:
+            w = forecasts.get(key)
+            if not w:
+                continue
+            if "typical_pp" in w:
+                typical = f"≈{w['typical_pp']:g}"
+                basis = {"model": "модель", "model_effort": "модель + міркування",
+                         "sum_of_steps": "мін. на крок"}.get(w.get("basis"), "")
+                card.append(f"{names[key]}: <b>{typical} в.п.</b> · із запасом {w['planning_upper_pp']:g}")
+                card.append(f"<i>{basis} · {w['n']} замірів</i>")
+            elif "steps_covered" in w:
+                card.append(f"{names[key]}: мало даних · {w['steps_covered']}/{tip['steps']} кроків")
+            else:
+                card.append(f"{names[key]}: мало даних · {w['n']}/{estimate_quota.MIN_SAMPLES} замірів")
+        if any("typical_pp" in w for w in forecasts.values()):
+            card.append("<i>Зміна квоти акаунта, не гарантована витрата рану.</i>")
+    if notices:
+        action = data["decision"]["action"]
+        heading = "Запуск відкладено" if action == "defer" else "Запуск заблоковано" if action == "block" else "Увага"
+        card.extend(["", f"<b>⚠ {heading}</b>", *("• " + esc(n) for n in notices)])
+    print("\n".join(card))
+
+
 def render(data, markup=True):
     eta = data["eta"]
     label = " · ".join(f"{s['backend']}/{s['model']}" + (f" · {s['effort']}" if s["effort"] else "")
@@ -371,7 +482,7 @@ def render(data, markup=True):
             missing = eta["missing_steps"]
             eta_lines.append("Без ETA · " + ", ".join(missing[:5]) + (f" · +{len(missing)-5}" if len(missing) > 5 else ""))
         else:
-            eta_lines.append("ETA н/д · історія " + str(eta.get("n", sum(s["eta"]["n"] for s in data["steps"]))))
+            eta_lines.append("ETA н/д · історія " + str(eta["n"] if "n" in eta else sum(s["eta"]["n"] for s in data["steps"])))
     else:
         upper = eta.get("p90_seconds", eta.get("upper_seconds"))
         eta_basis = f"n={eta['n']}" if "n" in eta else "сума/розклад кроків"
@@ -426,6 +537,10 @@ def render(data, markup=True):
             eta_lines[0] += f" · {eta_basis}; попередньо"
         forecast = ([forecast_title] if forecast_title else []) + forecast_lines
         print("\n".join([label, *eta_lines, *quota_lines, *forecast, *plain_note, *notices]))
+        return
+
+    if any(step["backend"] == "codex" for step in data["steps"]):
+        render_codex_card(data, notices)
         return
 
     def escape(line):
