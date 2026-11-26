@@ -136,10 +136,47 @@ log(){ echo "[$(date -u +%H:%M:%S)] $*" >> "$CHAIN"; }
 # notify — afterflight (ok/fail/session/ланцюг), зі звуком, однорядковий телеграф.
 # notify_silent — preflight (старт, <pre>-таблиця), без звуку (disable_notification).
 NOTIFY=${CC_NOTIFY:-$BIN/cc-notify.sh}
-notify(){ [ -f "$NOTIFY" ] || return 0; sh "$NOTIFY" "$*${V3_FACT:+
-<pre>$V3_FACT</pre>}" >/dev/null 2>&1 || true; }
-notify_silent(){ [ -f "$NOTIFY" ] || return 0; sh "$NOTIFY" "$1" silent >/dev/null 2>&1 || true; }
+# 26.11: вивід cc-notify.sh (curl_rc/http, без токена) раніше йшов у /dev/null —
+# провал доставки не лишав слідів. Тепер, як notify-debug.log у cc-run.sh, — у
+# $CHAIN.notify-debug.log; нема "http=200" -> рядок у лог ланцюга.
+NOTIFY_LOG=$CHAIN.notify-debug.log
+notify_send(){
+  [ -f "$NOTIFY" ] || return 0
+  _nk=$1; shift
+  _no=$(sh "$NOTIFY" "$@" 2>&1 >/dev/null); _nrc=$?
+  { echo "--- $_nk $(date -u +%FT%TZ) ---"; [ -n "$_no" ] && printf '%s\n' "$_no"; echo "$_nk rc=$_nrc"; } >> "$NOTIFY_LOG" 2>/dev/null
+  case "$_no" in
+    *"http=200"*) : ;;
+    *) log "$_nk: Telegram не підтвердив доставку ($(printf '%s' "$_no" | tr '\n' ' ' | cut -c1-200)) — див. $NOTIFY_LOG" ;;
+  esac
+  return 0
+}
+notify(){ notify_send notify "$*${V3_FACT:+
+<pre>$V3_FACT</pre>}" || true; }
+notify_silent(){ notify_send notify_silent "$1" silent || true; }
 PASSED=0
+
+# 26.11: зовнішнє вбивство (SIGTERM/INT/HUP) гасило ланцюг мовчки: run-dir
+# кроку без exit_code (runwatch: stalled), у Telegram нічого. Тепер — exit_code
+# 143/130/129 + fail_reason KILLED у run-dir поточного кроку і afterflight-
+# повідомлення. Бекенд запускається через `& wait` (див. do_run), бо dash
+# відкладає trap до кінця foreground-процесу. SIGKILL не ловиться.
+CUR_D=""; CUR_ID=""; CHILD_PID=""
+on_signal(){
+  trap '' TERM INT HUP
+  [ -n "$CHILD_PID" ] && kill -TERM "$CHILD_PID" 2>/dev/null
+  if [ -n "$CUR_D" ] && [ ! -s "$CUR_D/exit_code" ]; then
+    echo KILLED > "$CUR_D/fail_reason"
+    echo "$2" > "$CUR_D/exit_code"
+  fi
+  log "${CUR_ID:+$CUR_ID: }KILLED — ланцюг отримав SIG$1, exit $2"
+  V3_FACT=""
+  notify "☠️ $TAG · ланцюг вбито (SIG$1)${CUR_ID:+ · <code>$CUR_ID</code>} · $PASSED ok до цього · exit $2"
+  exit "$2"
+}
+trap 'on_signal TERM 143' TERM
+trap 'on_signal INT 130' INT
+trap 'on_signal HUP 129' HUP
 
 # --- Протокол аромату (рішення 24.08) ---
 # Порожнє/auto/будь-яке значення style, відмінне від трьох літералів нижче,
@@ -249,6 +286,7 @@ do_run(){
     sh "$BIN/cc-opus-gate.sh" "$GATEMODEL" "$slug" || { log "$slug: opus-gate ВІДМОВА — ланцюг спинено"; exit 6; }
   fi
   id="$slug-$STAMP"; d="$RUNS/$id"; mkdir -p "$d"
+  CUR_D=$d; CUR_ID=$id
   cd "$CWD" || exit 1
   git rev-parse HEAD > "$d/base_sha"
   git checkout -q -b "cc/$id" || { log "$id: не змогло створити гілку"; exit 1; }
@@ -332,8 +370,8 @@ $STEP_PREFLIGHT"
       -c "approval_policy=$CC_CODEX_APPROVAL_POLICY" \
       -c model_auto_compact_token_limit=270000 \
       -C "$CWD" --json -o "$d/last-message.txt" "$(cat "$d/task.md")" \
-      < /dev/null > "$d/events.jsonl" 2> "$d/out.log"
-    CLAUDE_EXIT=$?
+      < /dev/null > "$d/events.jsonl" 2> "$d/out.log" &
+    CHILD_PID=$!; wait "$CHILD_PID"; CLAUDE_EXIT=$?; CHILD_PID=""
     cc_v3_clock end
     [ -f "$d/last-message.txt" ] && cat "$d/last-message.txt" >> "$d/out.log"
     # turn.failed / квота / rate-limit в events.jsonl -> той самий шлях
@@ -348,13 +386,13 @@ $STEP_PREFLIGHT"
     fi
   elif [ "$style" = "none" ]; then
     cc_v3_clock start
-    timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$d/task.md")" $MODELARG $SESSARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" --allowedTools "$TOOLS" < /dev/null > "$d/out.log" 2>&1
-    CLAUDE_EXIT=$?
+    timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$d/task.md")" $MODELARG $SESSARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" --allowedTools "$TOOLS" < /dev/null > "$d/out.log" 2>&1 &
+    CHILD_PID=$!; wait "$CHILD_PID"; CLAUDE_EXIT=$?; CHILD_PID=""
     cc_v3_clock end
   else
     cc_v3_clock start
-    timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$d/task.md")" $MODELARG $SESSARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" --allowedTools "$TOOLS" --settings "{\"outputStyle\":\"$style\"}" < /dev/null > "$d/out.log" 2>&1
-    CLAUDE_EXIT=$?
+    timeout "$RUN_TIMEOUT_S" env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$CC_CLAUDE_BIN" -p "$(cat "$d/task.md")" $MODELARG $SESSARG --permission-mode "$CC_CLAUDE_PERMISSION_MODE" --allowedTools "$TOOLS" --settings "{\"outputStyle\":\"$style\"}" < /dev/null > "$d/out.log" 2>&1 &
+    CHILD_PID=$!; wait "$CHILD_PID"; CLAUDE_EXIT=$?; CHILD_PID=""
     cc_v3_clock end
   fi
   [ "$CLAUDE_EXIT" = 124 ] && log "$id: TIMEOUT — вбито по ${RUN_TIMEOUT_S}s, перевіряю чи є реальна робота нижче"
@@ -408,6 +446,7 @@ $STEP_PREFLIGHT"
     echo 0 > "$d/exit_code"
     chain_telemetry "$d" ok
     PASSED=$((PASSED+1)); notify "✅ $TAG · run ok · <code>$(git rev-parse --short HEAD)</code> · пройдено $PASSED"
+    CUR_D=""; CUR_ID=""
   else
     if [ "$CLAUDE_EXIT" = 0 ]; then
       # claude завершився чисто, але RESULT: ok не знайдено — розрізняємо

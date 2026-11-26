@@ -42,19 +42,25 @@ OWNER_CHAT_ID=$(grep -E '^OWNER_CHAT_ID=' "$ENV_FILE" 2>/dev/null | head -1 | cu
 [ -n "${OWNER_CHAT_ID:-}" ] || { echo "cc-notify: нема OWNER_CHAT_ID" >&2; exit 0; }
 
 API="https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
+# Тіло відповіді — лише для діагностики не-200 (поле description, токена в ньому
+# нема); рішення "доставлено" все одно приймається за curl_rc + http.
+BODY=$(mktemp 2>/dev/null) || BODY=/dev/null
+trap '[ "$BODY" = /dev/null ] || rm -f "$BODY"' EXIT
+api_err(){ [ "$BODY" = /dev/null ] || sed -n 's/.*"description":"\([^"]*\)".*/\1/p' "$BODY" 2>/dev/null | head -1 | cut -c1-200; }
 
 # Беремо HTTP-код окремо від тіла: тіло може прийти порожнім/обрізаним (повільна
 # мережа, підріз --max-time ПІСЛЯ того як Telegram уже прийняв повідомлення), і
 # матч по тілу тоді хибно вважав це провалом → слав дубль. Тепер орієнтир — сам
 # факт доставки: curl достукався (rc=0) і Telegram відповів 200.
-HTTP=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' "$API" \
+HTTP=$(curl -sS --max-time 20 -o "$BODY" -w '%{http_code}' "$API" \
   --data-urlencode "chat_id=${OWNER_CHAT_ID}" \
   --data-urlencode "parse_mode=HTML" \
   --data-urlencode "disable_web_page_preview=true" \
   --data-urlencode "disable_notification=${DN}" \
   --data-urlencode "text=${MSG}" 2>/dev/null)
 CURL_RC=$?
-echo "html: curl_rc=$CURL_RC http=$HTTP" >&2
+ERR=""; [ "$HTTP" = "200" ] || ERR=$(api_err)
+echo "html: curl_rc=$CURL_RC http=$HTTP${ERR:+ api=$ERR}" >&2
 
 # Ретрай ПЛЕЙНТЕКСТОМ лише коли повідомлення реально не пройшло: curl не достукався
 # АБО код не 200 (напр. 400 через криві HTML-теги). rc=0 + 200 = доставлено, не дублюємо.
@@ -64,12 +70,13 @@ fi
 
 # Фолбек: той самий текст без розмітки.
 PLAIN=$(printf '%s' "$MSG" | sed -e 's/<[^>]*>//g')
-HTTP2=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' "$API" \
+HTTP2=$(curl -sS --max-time 20 -o "$BODY" -w '%{http_code}' "$API" \
   --data-urlencode "chat_id=${OWNER_CHAT_ID}" \
   --data-urlencode "disable_web_page_preview=true" \
   --data-urlencode "disable_notification=${DN}" \
   --data-urlencode "text=${PLAIN}" 2>/dev/null)
 CURL_RC2=$?
-echo "plain: curl_rc=$CURL_RC2 http=$HTTP2" >&2
+ERR=""; [ "$HTTP2" = "200" ] || ERR=$(api_err)
+echo "plain: curl_rc=$CURL_RC2 http=$HTTP2${ERR:+ api=$ERR}" >&2
 
 exit 0
